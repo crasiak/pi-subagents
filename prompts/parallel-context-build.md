@@ -4,6 +4,8 @@ description: Parallel context builders for planning handoff
 
 Launch fresh-context `context-builder` subagents in parallel to build grounded handoff context for planning or implementation.
 
+Each context-building leaf declares `acceptance: { effects: "advisory", level: "attested" }`; requested handoff artifacts are not implementation changes. Put effects on leaves, not groups. Retain stronger caller requirements and report incompatible runtimes rather than stripping effects or fabricating writer evidence.
+
 Use the `subagent` tool in chain mode with a single parallel step, not top-level parallel tasks, so relative output files live under the temporary chain directory. Use `context: "fresh"` unless I explicitly ask for forked context. Give every parallel task a distinct `output` path, `label`, and `as` name, for example:
 
 - `context-build/request-and-scope.md`

@@ -99,6 +99,7 @@ export function buildWorkflowGraphSnapshot(input: WorkflowGraphBuildInput): Work
 					outputName: task.as,
 					structured: Boolean(task.outputSchema),
 					acceptanceStatus: input.results?.[flatIndex]?.acceptance?.status,
+					...(input.results?.[flatIndex]?.acceptance?.effectiveAcceptance.effects ? { effects: input.results[flatIndex].acceptance!.effectiveAcceptance.effects } : {}),
 					error: input.stepStatuses?.[flatIndex]?.error ?? input.results?.[flatIndex]?.error,
 				};
 				children.push(child);
@@ -143,6 +144,7 @@ export function buildWorkflowGraphSnapshot(input: WorkflowGraphBuildInput): Work
 					outputName: task.outputName,
 					structured: task.structured,
 					acceptanceStatus: input.results?.[task.flatIndex]?.acceptance?.status,
+					...(input.results?.[task.flatIndex]?.acceptance?.effectiveAcceptance.effects ? { effects: input.results[task.flatIndex].acceptance!.effectiveAcceptance.effects } : {}),
 					error: input.stepStatuses?.[task.flatIndex]?.error ?? input.results?.[task.flatIndex]?.error ?? task.error,
 				};
 				children.push(child);
@@ -160,6 +162,7 @@ export function buildWorkflowGraphSnapshot(input: WorkflowGraphBuildInput): Work
 				outputName: step.collect.as,
 				structured: Boolean(step.collect.outputSchema),
 				acceptanceStatus: groupOverride?.acceptance?.status,
+				...(groupOverride?.acceptance?.effectiveAcceptance.effects ? { effects: groupOverride.acceptance.effectiveAcceptance.effects } : {}),
 				error: groupOverride?.error,
 				dynamic: {
 					sourceOutput: step.expand.from.output,
@@ -189,6 +192,7 @@ export function buildWorkflowGraphSnapshot(input: WorkflowGraphBuildInput): Work
 			outputName: seq.as,
 			structured: Boolean(seq.outputSchema),
 			acceptanceStatus: input.results?.[flatIndex]?.acceptance?.status,
+			...(input.results?.[flatIndex]?.acceptance?.effectiveAcceptance.effects ? { effects: input.results[flatIndex].acceptance!.effectiveAcceptance.effects } : {}),
 			error: input.stepStatuses?.[flatIndex]?.error ?? input.results?.[flatIndex]?.error,
 		});
 		pushPhase(phases, seq.phase, id);

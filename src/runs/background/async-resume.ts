@@ -4,6 +4,7 @@ import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type SubagentState } from "..
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { deliverInterruptRequest } from "./control-channel.ts";
 import { reconcileAsyncRun } from "./stale-run-reconciler.ts";
+import { selectLeafAcceptanceSnapshot } from "../shared/acceptance-contract.ts";
 
 export const ASYNC_RESUME_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 
@@ -26,6 +27,7 @@ export interface AsyncResumeOptions {
 }
 
 export type AsyncResumeTarget = {
+	effectiveAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 	kind: "live" | "revive";
 	runId: string;
 	asyncDir?: string;
@@ -84,7 +86,7 @@ interface AsyncResultFile {
 	success?: boolean;
 	cwd?: string;
 	sessionFile?: string;
-	results?: Array<{ agent?: string; success?: boolean; sessionFile?: string; intercomTarget?: string }>;
+	results?: Array<{ agent?: string; success?: boolean; sessionFile?: string; intercomTarget?: string; effectiveAcceptance?: unknown; acceptance?: { effectiveAcceptance?: unknown } }>;
 }
 
 export interface AsyncRunLocation {
@@ -124,7 +126,19 @@ function validateResultFile(value: unknown, resultPath: string): AsyncResultFile
 			const intercomTarget = validateOptionalString(child, "intercomTarget", resultPath, `results[${index}].intercomTarget`);
 			const success = child.success;
 			if (success !== undefined && typeof success !== "boolean") throw new Error(`Invalid async result file '${resultPath}': results[${index}].success must be a boolean.`);
-			return { agent, sessionFile, intercomTarget, ...(typeof success === "boolean" ? { success } : {}) };
+			// Preserve both carriers for the shared snapshot validator/comparator.
+			// A present malformed carrier is not permission to choose another one.
+			const effectiveAcceptance = child.effectiveAcceptance === undefined ? undefined
+				: ensureObject(child.effectiveAcceptance, `${resultPath} results[${index}].effectiveAcceptance`);
+			const ledger = child.acceptance === undefined ? undefined
+				: ensureObject(child.acceptance, `${resultPath} results[${index}].acceptance`);
+			const ledgerPolicy = ledger?.effectiveAcceptance === undefined ? undefined
+				: ensureObject(ledger.effectiveAcceptance, `${resultPath} results[${index}].acceptance.effectiveAcceptance`);
+			return {
+				agent, sessionFile, intercomTarget, ...(typeof success === "boolean" ? { success } : {}),
+				...(effectiveAcceptance !== undefined ? { effectiveAcceptance } : {}),
+				...(ledger !== undefined ? { acceptance: { effectiveAcceptance: ledgerPolicy } } : {}),
+			};
 		});
 	}
 	const success = data.success;
@@ -361,8 +375,12 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		?? (stepCount === 1 ? status?.sessionFile ?? result?.sessionFile : undefined);
 	if (!sessionFile && requireSessionFile) throw new Error(`Async run '${runId}' child ${index} does not have a persisted session file to resume from.`);
 	const resolvedSessionFile = sessionFile ? validateResumeSessionFile(runId, sessionFile) : undefined;
+	const policies = [statusSteps[index]?.effectiveAcceptance, statusSteps[index]?.acceptance?.effectiveAcceptance,
+		resultSteps[index]?.effectiveAcceptance, resultSteps[index]?.acceptance?.effectiveAcceptance];
+	const effectiveAcceptance = policies.some((policy) => policy !== undefined) ? selectLeafAcceptanceSnapshot(...policies) : undefined;
 
 	return {
+		...(effectiveAcceptance ? { effectiveAcceptance } : {}),
 		kind: "revive",
 		runId,
 		asyncDir: location.asyncDir ?? undefined,

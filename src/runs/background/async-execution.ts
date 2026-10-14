@@ -25,7 +25,9 @@ import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
 import { ChainOutputValidationError, validateChainOutputBindings } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
-import { resolveEffectiveAcceptance } from "../shared/acceptance.ts";
+import { resolveEffectiveAcceptance, resolveGroupAcceptance } from "../shared/acceptance.ts";
+import { acceptanceLocation } from "../shared/acceptance-location.ts";
+import { requireLeafAcceptanceSnapshot } from "../shared/acceptance-contract.ts";
 import {
 	type AcceptanceInput,
 	type ArtifactConfig,
@@ -48,6 +50,13 @@ import { nestedResultsPath, resolveInheritedNestedRouteFromEnv, resolveNestedPar
 import { initialTurnBudgetState } from "../shared/turn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import type { ImportedAsyncRoot } from "./chain-root-attachment.ts";
+import { nativeDeadlineClock, type DeadlineClock } from "./deadline-clock.ts";
+
+const nativeRunnerEntry = path.join(path.dirname(fileURLToPath(import.meta.url)), "subagent-runner.ts");
+interface AsyncRuntime {
+	deadlineClock: DeadlineClock;
+	spawnRunner: (cfg: object, suffix: string, cwd: string) => { pid?: number; error?: string };
+}
 
 const require = createRequire(import.meta.url);
 const piPackageRoot = resolvePiPackageRoot();
@@ -147,6 +156,8 @@ interface AsyncChainParams {
 }
 
 interface AsyncSingleParams {
+	/** Trusted revived policy; never constructed from task prose. */
+	resolvedAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 	agent: string;
 	task?: string;
 	agentConfig: AgentConfig;
@@ -280,7 +291,7 @@ function closeFd(fd: number | undefined): void {
 /**
  * Spawn the async runner process
  */
-function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; error?: string } {
+function spawnRunner(cfg: object, suffix: string, cwd: string, runner: string): { pid?: number; error?: string } {
 	if (!jitiCliPath) {
 		return { error: "upstream jiti for TypeScript execution could not be found; ensure package dependencies are installed" };
 	}
@@ -297,7 +308,6 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; 
 	fs.mkdirSync(TEMP_ROOT_DIR, { recursive: true });
 	const cfgPath = getAsyncConfigPath(suffix);
 	fs.writeFileSync(cfgPath, JSON.stringify(cfg));
-	const runner = path.join(path.dirname(fileURLToPath(import.meta.url)), "subagent-runner.ts");
 	const nodeCommand = resolveAsyncRunnerNodeCommand();
 
 	const logPaths = resolveAsyncRunnerLogPaths(cfg);
@@ -418,7 +428,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			...(s.model ? { model: s.model } : {}),
 		};
 	};
-	const buildSeqStep = (s: SequentialStep, sessionFile?: string, behaviorCwd?: string, progressPrecreated = false, resolvedBehavior?: ResolvedStepBehavior, flatIndex?: number) => {
+	const buildSeqStep = (s: SequentialStep, sessionFile?: string, behaviorCwd?: string, progressPrecreated = false, resolvedBehavior?: ResolvedStepBehavior, flatIndex?: number, dynamic = false, effectsPath = "acceptance.effects") => {
 		const a = agents.find((x) => x.name === s.agent)!;
 		const toolBudgetInput = s.toolBudget ?? params.toolBudget ?? a.toolBudget ?? params.configToolBudget;
 		const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, s.toolBudget ? "toolBudget" : a.toolBudget ? "agent.toolBudget" : "config.toolBudget");
@@ -488,11 +498,12 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, a.maxSubagentDepth),
 			effectiveAcceptance: resolveEffectiveAcceptance({
 				explicit: s.acceptance,
+				effectsLocation: acceptanceLocation(s, effectsPath),
 				agentName: s.agent,
 				task: s.task,
 				mode: resultMode,
 				async: true,
-				dynamic: false,
+				dynamic,
 			}),
 			...(s.outputSchema ? { structuredOutputSchema: s.outputSchema } : {}),
 			...(s.outputSchema ? { structuredOutput: createStructuredOutputRuntime(s.outputSchema, path.join(asyncDir, "structured-output")) } : {}),
@@ -536,7 +547,8 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 							}
 						}
 						const staticStep = nextFlatStep();
-						return buildSeqStep(t, staticStep.sessionFile, behaviorCwd, progressPrecreated, parallelBehaviors[taskIndex], staticStep.index);
+						return buildSeqStep(t, staticStep.sessionFile, behaviorCwd, progressPrecreated, parallelBehaviors[taskIndex], staticStep.index, false,
+							resultMode === "parallel" ? `tasks[${taskIndex}].acceptance.effects` : `chain[${stepIndex}].parallel[${taskIndex}].acceptance.effects`);
 					}),
 					concurrency: s.concurrency,
 					failFast: s.failFast,
@@ -553,9 +565,10 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 				}
 				const maxItems = s.expand.maxItems ?? params.dynamicFanoutMaxItems ?? 0;
 				const dynamicFlatSteps = Array.from({ length: maxItems }, () => nextFlatStep());
+				const childTemplate = buildSeqStep(s.parallel as SequentialStep, undefined, undefined, progressPrecreated, behavior, undefined, true, `chain[${stepIndex}].parallel.acceptance.effects`);
 				return {
 					expand: s.expand,
-					parallel: buildSeqStep(s.parallel as SequentialStep, undefined, undefined, progressPrecreated, behavior),
+					parallel: childTemplate,
 					collect: s.collect,
 					concurrency: s.concurrency,
 					failFast: s.failFast,
@@ -563,18 +576,14 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 					label: s.label,
 					sessionFiles: dynamicFlatSteps.map((step) => step.sessionFile),
 					thinkingOverrides: dynamicFlatSteps.map((step) => step.thinkingOverride),
-					effectiveAcceptance: resolveEffectiveAcceptance({
-						explicit: s.acceptance,
-						agentName: s.parallel.agent,
-						task: s.parallel.task,
-						mode: resultMode,
-						async: true,
-						dynamicGroup: true,
+					effectiveAcceptance: resolveGroupAcceptance({
+						explicit: s.acceptance, template: childTemplate.effectiveAcceptance, children: [],
+						location: `chain[${stepIndex}].acceptance`, async: true,
 					}),
 				};
 			}
 			const staticStep = nextFlatStep();
-			return buildSeqStep(s as SequentialStep, staticStep.sessionFile, undefined, false, undefined, staticStep.index);
+			return buildSeqStep(s as SequentialStep, staticStep.sessionFile, undefined, false, undefined, staticStep.index, false, `chain[${stepIndex}].acceptance.effects`);
 		});
 		const steps = params.attachRoot
 			? [{
@@ -602,10 +611,12 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 /**
  * Execute a chain asynchronously
  */
-export function executeAsyncChain(
+function executeAsyncChainWithRuntime(
 	id: string,
 	params: AsyncChainParams,
+	runtime: AsyncRuntime,
 ): AsyncExecutionResult {
+	const { deadlineClock, spawnRunner } = runtime;
 	const {
 		chain,
 		agents,
@@ -674,7 +685,7 @@ export function executeAsyncChain(
 		return formatAsyncStartError(resultMode, built.error);
 	}
 	const { steps, runnerCwd, workflowGraph, eventChain } = built;
-	const deadlineAt = params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined;
+	const deadlineAt = params.timeoutMs !== undefined ? deadlineClock.now() + params.timeoutMs : undefined;
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
 	let childTargetIndex = 0;
 	const childIntercomTargets = childIntercomTarget ? steps.flatMap((step) => {
@@ -847,10 +858,12 @@ export function executeAsyncChain(
 /**
  * Execute a single agent asynchronously
  */
-export function executeAsyncSingle(
+function executeAsyncSingleWithRuntime(
 	id: string,
 	params: AsyncSingleParams,
+	runtime: AsyncRuntime,
 ): AsyncExecutionResult {
+	const { deadlineClock, spawnRunner } = runtime;
 	const {
 		agent,
 		agentConfig,
@@ -921,7 +934,7 @@ export function executeAsyncSingle(
 	const toolBudgetInput = params.toolBudget ?? agentConfig.toolBudget ?? params.configToolBudget;
 	const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, params.toolBudget ? "toolBudget" : agentConfig.toolBudget ? "agent.toolBudget" : "config.toolBudget");
 	if (resolvedToolBudget.error) return formatAsyncStartError("single", resolvedToolBudget.error);
-	const deadlineAt = params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined;
+	const deadlineAt = params.timeoutMs !== undefined ? deadlineClock.now() + params.timeoutMs : undefined;
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
 	let spawnResult: { pid?: number; error?: string } = {};
 	try {
@@ -953,7 +966,7 @@ export function executeAsyncSingle(
 						outputMode,
 						sessionFile,
 						maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, agentConfig.maxSubagentDepth),
-						effectiveAcceptance: resolveEffectiveAcceptance({
+						effectiveAcceptance: params.resolvedAcceptance ? requireLeafAcceptanceSnapshot(params.resolvedAcceptance) : resolveEffectiveAcceptance({
 							explicit: params.acceptance,
 							agentName: agent,
 							task,
@@ -1062,4 +1075,27 @@ export function executeAsyncSingle(
 		content: [{ type: "text", text: formatAsyncStartedMessage(`Async: ${agent} [${id}]`) }],
 		details: { mode: "single", runId: id, results: [], asyncId: id, asyncDir, ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}) },
 	};
+}
+
+/** Internal composition seam, not a supported tool/config API. Never read overrides from params/env. */
+export function createAsyncExecutors({ deadlineClock = nativeDeadlineClock, runnerEntry = nativeRunnerEntry }: {
+	deadlineClock?: DeadlineClock;
+	runnerEntry?: string;
+} = {}) {
+	const runtime: AsyncRuntime = {
+		deadlineClock,
+		spawnRunner: (cfg, suffix, cwd) => spawnRunner(cfg, suffix, cwd, runnerEntry),
+	};
+	return {
+		executeAsyncSingle: (id: string, params: AsyncSingleParams) => executeAsyncSingleWithRuntime(id, params, runtime),
+		executeAsyncChain: (id: string, params: AsyncChainParams) => executeAsyncChainWithRuntime(id, params, runtime),
+	};
+}
+
+const productionExecutors = createAsyncExecutors();
+export function executeAsyncSingle(id: string, params: AsyncSingleParams): AsyncExecutionResult {
+	return productionExecutors.executeAsyncSingle(id, params);
+}
+export function executeAsyncChain(id: string, params: AsyncChainParams): AsyncExecutionResult {
+	return productionExecutors.executeAsyncChain(id, params);
 }

@@ -666,8 +666,10 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 			output: "targets",
 			structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] },
 		});
-		mockPi.onCall({ output: acceptanceReport({ changedFiles: ["src/a.ts"] }), structuredOutput: { ok: "a" } });
-		mockPi.onCall({ output: acceptanceReport({ changedFiles: ["src/b.ts"] }), structuredOutput: { ok: "b" } });
+		// V2 gives dynamic leaves reviewed rigor; these are synthetic claims for both inferred criteria.
+		const criteriaSatisfied = [1, 2].map((n) => ({ id: `criterion-${n}`, status: "satisfied", evidence: "fixture inspection and evidence" }));
+		mockPi.onCall({ output: acceptanceReport({ changedFiles: ["src/a.ts"], criteriaSatisfied }), structuredOutput: { ok: "a" } });
+		mockPi.onCall({ output: acceptanceReport({ changedFiles: ["src/b.ts"], criteriaSatisfied }), structuredOutput: { ok: "b" } });
 		const agents = [makeAgent("scout"), makeAgent("reviewer", { completionGuard: false })];
 
 		const result = await executeChain(

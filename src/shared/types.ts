@@ -54,6 +54,7 @@ export interface WorkflowGraphNode {
 	outputName?: string;
 	structured?: boolean;
 	acceptanceStatus?: AcceptanceLedgerStatus;
+	effects?: ResolvedEffects;
 	error?: string;
 }
 
@@ -349,7 +350,19 @@ export interface AcceptanceReviewGate {
 	required?: boolean;
 }
 
+export type TaskEffects = "advisory" | "implementation";
+
+export interface ResolvedEffects {
+	policyVersion: 1;
+	declared?: TaskEffects;
+	effective: TaskEffects;
+	source: "caller" | "conservative-default" | "aggregate";
+	location: string;
+	children?: Array<{ id: string; effects?: ResolvedEffects }>;
+}
+
 export interface AcceptanceConfig {
+	effects?: TaskEffects;
 	level?: AcceptanceLevel;
 	criteria?: Array<string | AcceptanceGate>;
 	evidence?: AcceptanceEvidenceKind[];
@@ -369,6 +382,9 @@ export interface ResolvedAcceptanceGate extends AcceptanceGate {
 }
 
 export interface ResolvedAcceptanceConfig {
+	effects: ResolvedEffects;
+	/** An explicit verified request remains required even if rigor rises to reviewed. */
+	requireVerification?: boolean;
 	level: Exclude<AcceptanceLevel, "auto">;
 	explicit: boolean;
 	inferredReason: string[];
@@ -460,6 +476,9 @@ export interface AcceptanceLedger {
 }
 
 export interface SingleResult {
+	/** Frozen before child launch, even if attestation later times out or fails. */
+	effectiveAcceptance?: ResolvedAcceptanceConfig;
+	acceptanceSnapshotPath?: string;
 	agent: string;
 	task: string;
 	exitCode: number;
@@ -754,6 +773,7 @@ export interface AsyncStatus {
 		structuredOutput?: unknown;
 		structuredOutputPath?: string;
 		structuredOutputSchemaPath?: string;
+		effectiveAcceptance?: ResolvedAcceptanceConfig;
 		acceptance?: AcceptanceLedger;
 	}>;
 	sessionDir?: string;
@@ -814,6 +834,7 @@ export interface AsyncJobState {
 }
 
 export interface ForegroundResumeChild {
+	effectiveAcceptance?: ResolvedAcceptanceConfig;
 	agent: string;
 	index: number;
 	sessionFile?: string;
@@ -960,7 +981,12 @@ export interface RunSyncOptions {
 		outputPath: string;
 	};
 	acceptance?: AcceptanceInput;
+	/** Trusted internal continuation only; never accepted from execution tool params. */
+	resolvedAcceptance?: ResolvedAcceptanceConfig;
 	acceptanceContext?: {
+		/** Caller task/template before framework routing or output instructions. */
+		task?: string;
+		effectsLocation?: string;
 		mode?: SubagentRunMode;
 		async?: boolean;
 		dynamic?: boolean;

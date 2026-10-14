@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { MockPi } from "../support/helpers.ts";
 import { createEventBus, createMockPi, createTempDir, events, removeTempDir, tryImport } from "../support/helpers.ts";
 import { discoverAgents } from "../../src/agents/agents.ts";
+import { concurrencyFixture, runWithAcknowledgedOverlap } from "../support/concurrency-harness.ts";
 import { INTERCOM_DETACH_REQUEST_EVENT } from "../../src/shared/types.ts";
 
 interface ExecutorModule {
@@ -34,7 +35,7 @@ interface AsyncExecutionModule {
 
 interface ProgressUpdate {
 	details?: {
-		progress?: Array<{ status?: string; currentTool?: string }>;
+		progress?: Array<{ index?: number; status?: string; currentTool?: string }>;
 	};
 }
 
@@ -924,11 +925,15 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			{ name: "per-call", configConcurrency: 3, paramsConcurrency: 1, expectedMaxRunning: 1 },
 		]) {
 			mockPi.reset();
+			const fixture = concurrencyFixture(testCase.name);
 			for (let i = 0; i < 3; i++) {
 				mockPi.onCall({
+					matchArgIncludes: `task ${["one", "two", "three"][i]}`,
+					// Deliberately skew output: overlap must come from acknowledgement, not250ms luck.
+					delay: i * 300,
 					steps: [
 						{ jsonl: [events.toolStart("bash", { command: `${testCase.name}-${i}` })] },
-						{ delay: 250 },
+						{ waitForRelease: { ...fixture, index: i } },
 						{ jsonl: [events.toolEnd("bash"), events.assistantMessage(`done-${i}`)] },
 					],
 				});
@@ -937,24 +942,28 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			const executor = makeExecutorWithConfig({ parallel: { concurrency: testCase.configConcurrency } });
 			let maxRunning = 0;
 
-			const result = await executor.execute(
-				"id",
-				{
-					tasks: [
-						{ agent: "echo", task: "task one" },
-						{ agent: "second", task: "task two" },
-						{ agent: "echo", task: "task three" },
-					],
-					...(testCase.paramsConcurrency ? { concurrency: testCase.paramsConcurrency } : {}),
-				},
-				new AbortController().signal,
-				(update: ProgressUpdate) => {
-					const progress = update.details?.progress ?? [];
-					const running = progress.filter((entry) => entry.status === "running").length;
-					maxRunning = Math.max(maxRunning, running);
-				},
-				makeCtx(makeSessionManagerRecorder().manager),
-			);
+			const result = await runWithAcknowledgedOverlap({
+				fixture, queueDir: mockPi.dir, concurrency: testCase.expectedMaxRunning, count: 3,
+				execute: (signal, observe) => executor.execute(
+					"id",
+					{
+						tasks: [
+							{ agent: "echo", task: "task one" },
+							{ agent: "second", task: "task two" },
+							{ agent: "echo", task: "task three" },
+						],
+						...(testCase.paramsConcurrency ? { concurrency: testCase.paramsConcurrency } : {}),
+					},
+					signal,
+					(update: ProgressUpdate) => {
+						const progress = update.details?.progress ?? [];
+						observe(progress);
+						const running = progress.filter((entry) => entry.status === "running").length;
+						maxRunning = Math.max(maxRunning, running);
+					},
+					makeCtx(makeSessionManagerRecorder().manager),
+				),
+			});
 
 			assert.equal(result.isError, undefined, testCase.name);
 			assert.equal(maxRunning, testCase.expectedMaxRunning, testCase.name);

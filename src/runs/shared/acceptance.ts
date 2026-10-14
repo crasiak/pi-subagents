@@ -15,6 +15,7 @@ import type {
 	AcceptanceVerifyResult,
 	ResolvedAcceptanceConfig,
 	ResolvedAcceptanceGate,
+	ResolvedEffects,
 	SingleResult,
 	SubagentRunMode,
 } from "../../shared/types.ts";
@@ -39,7 +40,7 @@ const VALID_EVIDENCE = new Set<AcceptanceEvidenceKind>([
 	"review-findings",
 	"manual-notes",
 ]);
-const ACCEPTANCE_CONFIG_KEYS = new Set(["level", "criteria", "evidence", "verify", "review", "stopRules", "reason"]);
+const ACCEPTANCE_CONFIG_KEYS = new Set(["effects", "level", "criteria", "evidence", "verify", "review", "stopRules", "reason"]);
 const ACCEPTANCE_GATE_KEYS = new Set(["id", "must", "evidence", "severity"]);
 const ACCEPTANCE_VERIFY_KEYS = new Set(["id", "command", "timeoutMs", "cwd", "env", "allowFailure"]);
 const ACCEPTANCE_REVIEW_KEYS = new Set(["agent", "focus", "required"]);
@@ -52,7 +53,13 @@ function unique<T>(items: T[]): T[] {
 	return [...new Set(items)];
 }
 
-function requiredEvidenceForLevel(level: Exclude<AcceptanceLevel, "auto">): AcceptanceEvidenceKind[] {
+function requiredEvidenceForLevel(level: Exclude<AcceptanceLevel, "auto">, advisory = false): AcceptanceEvidenceKind[] {
+	if (advisory && level !== "none") {
+		if (level === "attested") return ["review-findings", "residual-risks"];
+		const evidence: AcceptanceEvidenceKind[] = ["residual-risks", "no-staged-files"];
+		if (LEVEL_RANK[level] >= LEVEL_RANK.verified) evidence.push("validation-output");
+		return evidence;
+	}
 	switch (level) {
 		case "none":
 			return [];
@@ -67,61 +74,25 @@ function requiredEvidenceForLevel(level: Exclude<AcceptanceLevel, "auto">): Acce
 }
 
 function inferLevel(input: {
-	agentName: string;
 	task?: string;
-	mode?: SubagentRunMode;
 	async?: boolean;
 	dynamic?: boolean;
 	dynamicGroup?: boolean;
-}): { level: Exclude<AcceptanceLevel, "auto">; reasons: string[]; criteria: string[]; evidence: AcceptanceEvidenceKind[]; review?: { agent?: string; required?: boolean } } {
-	const agent = input.agentName.toLowerCase();
-	const task = input.task?.toLowerCase() ?? "";
-	const reasons: string[] = [];
-	const readOnlyAgent = /\b(?:reviewer|scout|context-builder|researcher|analyst)\b/.test(agent);
-	const readOnlyTask = /\b(?:read[- ]only|review[- ]only|do not edit|don't edit|no edits|without edits|inspect|summari[sz]e)\b/.test(task);
-	const writeTask = /\b(?:fix|implement|update|write|edit|modify|migrate|release|security|delete|remove|refactor|commit)\b/.test(task)
-		|| /\bworker\b/.test(agent);
-	const risky = Boolean(input.async && writeTask)
-		|| Boolean(input.dynamic)
-		|| Boolean(input.dynamicGroup)
-		|| /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/.test(task);
-
+}, effects: ResolvedEffects): { level: Exclude<AcceptanceLevel, "auto">; reasons: string[]; criteria: string[]; review?: { agent?: string; required?: boolean } } {
+	const advisory = effects.effective === "advisory";
+	const risky = Boolean(input.async && !advisory)
+		|| Boolean(input.dynamic || input.dynamicGroup)
+		|| /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/i.test(input.task ?? "");
+	const criteria = [advisory
+		? "Return concrete findings with file paths and severity when applicable"
+		: "Implement the requested change without widening scope"];
+	const reasons = [`${effects.source} ${effects.effective} effects`];
 	if (risky) {
-		reasons.push(input.async ? "async write-capable or risky run" : "risky write-capable run");
-		if (input.dynamic || input.dynamicGroup) reasons.push("dynamic fanout context");
-		return {
-			level: "reviewed",
-			reasons,
-			criteria: ["Implement the requested change without widening scope", "Return evidence sufficient for an independent acceptance review"],
-			evidence: requiredEvidenceForLevel("reviewed"),
-			review: { agent: "reviewer", required: true },
-		};
+		reasons.push("elevated review rigor");
+		criteria.push("Return evidence sufficient for an independent acceptance review");
+		return { level: "reviewed", reasons, criteria, review: { agent: "reviewer", required: true } };
 	}
-	if (writeTask && !readOnlyTask) {
-		reasons.push("write-capable worker/task");
-		return {
-			level: "checked",
-			reasons,
-			criteria: ["Implement the requested change without widening scope"],
-			evidence: requiredEvidenceForLevel("checked"),
-		};
-	}
-	if (readOnlyAgent || readOnlyTask) {
-		reasons.push(readOnlyAgent ? "read-only/reviewer-style agent" : "read-only task wording");
-		return {
-			level: "attested",
-			reasons,
-			criteria: ["Return concrete findings with file paths and severity when applicable"],
-			evidence: ["review-findings", "residual-risks"],
-		};
-	}
-	reasons.push("default lightweight attestation");
-	return {
-		level: "attested",
-		reasons,
-		criteria: ["Return a concise result and residual risks when applicable"],
-		evidence: ["manual-notes", "residual-risks"],
-	};
+	return { level: advisory ? "attested" : "checked", reasons, criteria };
 }
 
 export function normalizeAcceptanceInput(input: AcceptanceInput | undefined): AcceptanceConfig {
@@ -135,7 +106,7 @@ function explicitAcceptanceCanDisable(explicit: AcceptanceConfig): boolean {
 	return explicit.level === "none" && typeof explicit.reason === "string" && explicit.reason.trim().length > 0;
 }
 
-export function validateAcceptanceInput(input: unknown, pathLabel = "acceptance"): string[] {
+export function validateAcceptanceInput(input: unknown, pathLabel = "acceptance", scope: "leaf" | "container" | "dynamic-group" = "leaf"): string[] {
 	const errors: string[] = [];
 	if (input === undefined) return errors;
 	if (input === false) return errors;
@@ -148,6 +119,13 @@ export function validateAcceptanceInput(input: unknown, pathLabel = "acceptance"
 		return errors;
 	}
 	const value = input as Record<string, unknown>;
+	if (scope !== "leaf" && value.effects !== undefined) errors.push(`${pathLabel}.effects belongs on an executing leaf, not its container.`);
+	if (scope === "dynamic-group" && Array.isArray(value.criteria) && value.criteria.length) {
+		errors.push(`${pathLabel}.criteria must be omitted or empty; dynamic groups use canonical aggregation predicates. Use a downstream advisory task for semantic criteria.`);
+	}
+	if (value.effects !== undefined && value.effects !== "advisory" && value.effects !== "implementation") {
+		errors.push(`${pathLabel}.effects must be advisory or implementation.`);
+	}
 	for (const key of Object.keys(value)) {
 		if (!ACCEPTANCE_CONFIG_KEYS.has(key)) errors.push(`${pathLabel}.${key} is not supported.`);
 	}
@@ -270,16 +248,29 @@ export function resolveEffectiveAcceptance(input: {
 	async?: boolean;
 	dynamic?: boolean;
 	dynamicGroup?: boolean;
+	effectsLocation?: string;
 }): ResolvedAcceptanceConfig {
-	const explicit = normalizeAcceptanceInput(input.explicit);
-	const inferred = inferLevel(input);
+	// The caller may retain its input object while a child runs. Own this copy.
+	const explicit = structuredClone(normalizeAcceptanceInput(input.explicit));
+	const effects: ResolvedEffects = {
+		policyVersion: 1,
+		...(explicit.effects ? { declared: explicit.effects } : {}),
+		effective: explicit.effects ?? "implementation",
+		source: explicit.effects ? "caller" : "conservative-default",
+		location: input.effectsLocation ?? "acceptance.effects",
+	};
+	const inferred = inferLevel(input, effects);
 	const explicitLevel = normalizeLevel(explicit.level);
-	const level = explicitAcceptanceCanDisable(explicit)
-		? "none"
-		: explicitLevel === "auto"
-			? inferred.level
-			: (LEVEL_RANK[explicitLevel] >= LEVEL_RANK[inferred.level] ? explicitLevel : inferred.level);
-	const evidence = unique([...(level === inferred.level ? inferred.evidence : requiredEvidenceForLevel(level)), ...(explicit.evidence ?? [])]);
+	const prerequisites: Array<Exclude<AcceptanceLevel, "auto">> = [inferred.level];
+	if (explicitLevel !== "auto") prerequisites.push(explicitLevel);
+	if (explicit.criteria?.length || explicit.evidence?.length) prerequisites.push("checked");
+	if (explicit.verify?.length) prerequisites.push("verified");
+	if (explicit.review && explicit.review.required === true) prerequisites.push("reviewed");
+	const level = explicitAcceptanceCanDisable(explicit) ? "none"
+		: prerequisites.reduce((max, next) => LEVEL_RANK[next] > LEVEL_RANK[max] ? next : max);
+	const criterionEvidence = (explicit.criteria ?? []).flatMap((criterion) =>
+		typeof criterion !== "string" && criterion.severity !== "recommended" ? criterion.evidence ?? [] : []);
+	const evidence = unique([...requiredEvidenceForLevel(level, effects.effective === "advisory"), ...(explicit.evidence ?? []), ...criterionEvidence]);
 	const criteria = normalizeCriteria(
 		(explicit.criteria?.length ? explicit.criteria : inferred.criteria) as Array<string | { id?: string; must?: string; evidence?: AcceptanceEvidenceKind[]; severity?: "required" | "recommended" }>,
 		evidence,
@@ -289,16 +280,66 @@ export function resolveEffectiveAcceptance(input: {
 		review = { ...review, required: false };
 	}
 	return {
+		effects,
+		...(explicitLevel === "verified" ? { requireVerification: true } : {}),
 		level,
 		explicit: input.explicit !== undefined,
 		inferredReason: inferred.reasons,
 		criteria,
 		evidence,
 		verify: explicit.verify ?? [],
-		review,
+		...(review !== undefined ? { review } : {}),
 		stopRules: explicit.stopRules ?? [],
-		reason: explicit.reason,
+		...(explicit.reason !== undefined ? { reason: explicit.reason } : {}),
 	};
+}
+
+const GROUP_CRITERIA = [
+	{ id: "group-children-completed", must: "A nonempty set of children completed without child or acceptance blockers" },
+	{ id: "group-evidence-collected", must: "A parsed acceptance report is associated with every materialized child" },
+];
+
+export function resolveGroupAcceptance(input: {
+	explicit?: AcceptanceInput;
+	children: Array<{ id: string; acceptance?: ResolvedAcceptanceConfig }>;
+	template?: ResolvedAcceptanceConfig;
+	location: string;
+	async?: boolean;
+}): ResolvedAcceptanceConfig {
+	const errors = validateAcceptanceInput(input.explicit, input.location, "dynamic-group");
+	if (errors.length) throw new Error(errors.join(" "));
+	const policies = input.children.length ? input.children.map((child) => child.acceptance) : [input.template];
+	const advisory = policies.every((policy) => policy?.effects?.policyVersion === 1 && policy.effects.effective === "advisory");
+	const policy = resolveEffectiveAcceptance({
+		agentName: "group", dynamicGroup: true, async: input.async,
+		explicit: { ...normalizeAcceptanceInput(input.explicit), effects: advisory ? "advisory" : "implementation" },
+	});
+	const effects: ResolvedEffects = {
+		policyVersion: 1, effective: advisory ? "advisory" : "implementation", source: "aggregate", location: input.location,
+		children: input.children.map(({ id, acceptance }) => ({ id, ...(acceptance?.effects ? { effects: acceptance.effects } : {}) })),
+	};
+	return {
+		...policy, effects, explicit: input.explicit !== undefined,
+		inferredReason: [`aggregate ${effects.effective} effects`, "dynamic fanout context"],
+		criteria: GROUP_CRITERIA.map((criterion) => ({ ...criterion, evidence: policy.evidence, severity: "required" })),
+	};
+}
+
+export function bindGroupAcceptance(
+	policy: ResolvedAcceptanceConfig,
+	children: Array<{ id: string; acceptance?: ResolvedAcceptanceConfig }>,
+): ResolvedAcceptanceConfig {
+	if (policy.effects?.source !== "aggregate") throw new Error("Expected a resolved aggregate acceptance policy.");
+	const advisory = children.length > 0 && children.every(({ acceptance }) =>
+		acceptance?.effects?.policyVersion === 1 && acceptance.effects.effective === "advisory");
+	const effects: ResolvedEffects = {
+		...policy.effects, effective: advisory ? "advisory" : "implementation",
+		children: children.map(({ id, acceptance }) => ({ id, ...(acceptance?.effects ? { effects: acceptance.effects } : {}) })),
+	};
+	// Binding actual children may strengthen an uncertain template, never erase
+	// a frozen caller requirement. No leaf policy is recomputed here.
+	const evidence = unique([...policy.evidence, ...requiredEvidenceForLevel(policy.level, advisory)]);
+	return { ...policy, effects, evidence, criteria: GROUP_CRITERIA.map((criterion) => ({ ...criterion, evidence, severity: "required" })) };
 }
 
 export function formatAcceptancePrompt(acceptance: ResolvedAcceptanceConfig): string {
@@ -307,6 +348,9 @@ export function formatAcceptancePrompt(acceptance: ResolvedAcceptanceConfig): st
 		"",
 		"## Acceptance Contract",
 		`Acceptance level: ${acceptance.level}`,
+		`Task effects: ${acceptance.effects?.effective ?? "legacy/unknown"} (${acceptance.effects?.source ?? "legacy/unknown"})`,
+		"Evidence requirements do not authorize edits or widen the caller's task scope. If incompatible, report the conflict truthfully rather than manufacture changes.",
+		"Advisory effects are not a filesystem sandbox or proof that no mutation occurred.",
 		"Completion is not accepted from prose alone. End with a structured acceptance report.",
 		"",
 		"Criteria:",
@@ -685,10 +729,11 @@ export function aggregateAcceptanceReport(input: {
 	const childReports = input.results.map((result) => result.acceptance?.childReport).filter((report): report is AcceptanceReport => Boolean(report));
 	const blockers = input.results.filter((result) => result.exitCode !== 0 || result.acceptance?.status === "rejected");
 	const successfulChildren = input.results.length > 0 && blockers.length === 0;
+	const completeEvidence = input.results.length > 0 && childReports.length === input.results.length;
 	return {
 		criteriaSatisfied: [
-			{ id: "criterion-1", status: successfulChildren ? "satisfied" : "not-satisfied", evidence: successfulChildren ? `All ${input.results.length} dynamic child run(s) completed without child or acceptance blockers.` : "Dynamic fanout produced no accepted child evidence." },
-			{ id: "criterion-2", status: successfulChildren ? "satisfied" : "not-satisfied", evidence: successfulChildren ? "Collected child acceptance evidence for aggregate review." : "Dynamic fanout produced no aggregate review evidence." },
+			{ id: GROUP_CRITERIA[0].id, status: successfulChildren ? "satisfied" : "not-satisfied", evidence: successfulChildren ? `All ${input.results.length} dynamic child run(s) completed without child or acceptance blockers.` : "Dynamic fanout produced no accepted child evidence." },
+			{ id: GROUP_CRITERIA[1].id, status: completeEvidence ? "satisfied" : "not-satisfied", evidence: completeEvidence ? "Collected a parsed acceptance report for every materialized child." : "One or more materialized child reports are missing, or the group is empty." },
 			...input.results.map((result, index) => ({
 				id: `child-${index + 1}`,
 				status: result.exitCode === 0 && result.acceptance?.status !== "rejected" ? "satisfied" : "not-satisfied",
@@ -828,8 +873,8 @@ export async function evaluateAcceptance(input: {
 		ledger.status = "checked";
 	}
 
-	if (LEVEL_RANK[acceptance.level] >= LEVEL_RANK.verified && (acceptance.level === "verified" || acceptance.verify.length > 0)) {
-		if (acceptance.level === "verified" && acceptance.verify.length === 0) {
+	if (LEVEL_RANK[acceptance.level] >= LEVEL_RANK.verified && (acceptance.level === "verified" || acceptance.requireVerification || acceptance.verify.length > 0)) {
+		if ((acceptance.level === "verified" || acceptance.requireVerification) && acceptance.verify.length === 0) {
 			ledger.runtimeChecks.push({ id: "verification-config", status: "failed", message: "verified acceptance requires runtime verify commands." });
 			ledger.status = "rejected";
 			return ledger;

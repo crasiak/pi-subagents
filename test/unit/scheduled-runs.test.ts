@@ -182,6 +182,43 @@ describe("ScheduledRunManager create/list/status/cancel", () => {
 		return harness;
 	}
 
+	it("persists the effects policy epoch and the complete caller declaration", async () => {
+		const harness = freshHarness();
+		const acceptance = { effects: "advisory" as const, level: "checked" as const, evidence: ["residual-risks" as const] };
+		const result = await harness.manager.handleToolCall({ action: "schedule", agent: "reviewer", task: "Inspect", acceptance, schedule: "+1m" }, harness.ctx);
+		assert.equal(isError(result), false);
+		const stored = JSON.parse(fs.readFileSync(path.join(harness.storeRoot, fs.readdirSync(harness.storeRoot)[0]), "utf8"));
+		assert.equal(stored.jobs[0].acceptancePolicyVersion, 1);
+		assert.deepEqual(stored.jobs[0].params.acceptance, acceptance);
+	});
+	for (const version of [undefined, 2]) it(`holds queued unsupported effects policy version ${version}`, async () => {
+		const harness = freshHarness();
+		await harness.manager.handleToolCall({ action: "schedule", agent: "reviewer", task: "Inspect", schedule: "+1m" }, harness.ctx);
+		const filename = path.join(harness.storeRoot, fs.readdirSync(harness.storeRoot)[0]);
+		const stored = JSON.parse(fs.readFileSync(filename, "utf8"));
+		stored.jobs[0].acceptancePolicyVersion = version;
+		fs.writeFileSync(filename, JSON.stringify(stored));
+		harness.clock.now += 60_000; harness.timers.fireAll(); await flushMicrotasks();
+		assert.equal(harness.launches.length, 0);
+		const job = JSON.parse(fs.readFileSync(filename, "utf8")).jobs[0];
+		assert.equal(job.state, "failed");
+		assert.match(job.lastError, /acceptance policy.*fresh/i);
+	});
+	it("validates effects before scheduling and revalidates persisted input before firing", async () => {
+		const harness = freshHarness();
+		const invalid = await harness.manager.handleToolCall({ action: "schedule", tasks: [{ agent: "reviewer", task: "Inspect" }], acceptance: { effects: "advisory" }, schedule: "+1m" }, harness.ctx);
+		assert.equal(isError(invalid), true);
+		assert.equal(harness.timers.pendingCount(), 0);
+		await harness.manager.handleToolCall({ action: "schedule", agent: "reviewer", task: "Inspect", acceptance: { effects: "advisory" }, schedule: "+1m" }, harness.ctx);
+		const filename = path.join(harness.storeRoot, fs.readdirSync(harness.storeRoot)[0]);
+		const stored = JSON.parse(fs.readFileSync(filename, "utf8"));
+		stored.jobs[0].params.acceptance.effects = "auto";
+		fs.writeFileSync(filename, JSON.stringify(stored));
+		harness.clock.now += 60_000; harness.timers.fireAll(); await flushMicrotasks();
+		assert.equal(harness.launches.length, 0);
+		assert.match(JSON.parse(fs.readFileSync(filename, "utf8")).jobs[0].lastError, /effects/);
+	});
+
 	it("rejects schedule actions when the feature is disabled", async () => {
 		const harness = freshHarness({ config: makeConfig({ enabled: false }) });
 		const result = await harness.manager.handleToolCall({ action: "schedule", agent: "scout", task: "x", schedule: "+10m" }, harness.ctx);
@@ -428,6 +465,31 @@ describe("ScheduledRunManager restart restore", () => {
 			}
 		}
 	});
+
+	for (const kind of ["supported", "legacy", "future", "invalid-effects"]) {
+		it(`validates ${kind} queued policy at load before rearming, preserving terminal history`, async () => {
+			const initial = createHarness(); storeRoots.push(initial.storeRoot);
+			await initial.manager.handleToolCall({ action: "schedule", agent: "reviewer", task: "Inspect", acceptance: { effects: "advisory" }, schedule: "+1h" }, initial.ctx);
+			initial.manager.stop();
+			const filename = path.join(initial.storeRoot, fs.readdirSync(initial.storeRoot)[0]);
+			const stored = JSON.parse(fs.readFileSync(filename, "utf8"));
+			const terminal = { ...structuredClone(stored.jobs[0]), id: "terminal-history", state: "fired", acceptancePolicyVersion: 0, lastRunId: "old-run" };
+			stored.jobs.push(terminal);
+			if (kind === "legacy") delete stored.jobs[0].acceptancePolicyVersion;
+			if (kind === "future") stored.jobs[0].acceptancePolicyVersion = 2;
+			if (kind === "invalid-effects") stored.jobs[0].params.acceptance.effects = "auto";
+			fs.writeFileSync(filename, JSON.stringify(stored));
+			const restored = createHarness({ storeRoot: initial.storeRoot, now: initial.clock.now });
+			restored.manager.bindSession(initial.ctx);
+			const after = JSON.parse(fs.readFileSync(filename, "utf8"));
+			assert.equal(restored.timers.pendingCount(), kind === "supported" ? 1 : 0);
+			assert.equal(after.jobs[0].state, kind === "supported" ? "scheduled" : "failed");
+			if (kind !== "supported") assert.match(after.jobs[0].lastError, /policy|effects/);
+			assert.deepEqual(after.jobs[1], terminal);
+			assert.equal(restored.launches.length, 0);
+			restored.manager.stop();
+		});
+	}
 
 	it("re-arms pending jobs and marks stale jobs missed after a restart", async () => {
 		const storeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sched-restore-"));

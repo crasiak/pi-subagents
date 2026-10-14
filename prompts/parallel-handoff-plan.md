@@ -4,6 +4,8 @@ description: Parallel research/context builders into an implementation handoff p
 
 Use parallel subagents to understand the request, compare any external references, inspect the local codebase, and produce a grounded implementation handoff plan with a final implementation-ready meta-prompt.
 
+Research, context and synthesis leaves declare `acceptance: { effects: "advisory", level: "attested" }`. A handoff artifact is not a source implementation. Put effects on each leaf/template, never the group/root; preserve stronger caller requirements and report an incompatible runtime without removing the field or manufacturing writer evidence.
+
 Primary request, target, or focus:
 
 $@
