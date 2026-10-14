@@ -148,11 +148,13 @@ describe("subagent extension RPC bridge", () => {
 			},
 		});
 
-		const reply = await request(events, "spawn-1", "spawn", { agent: "worker", task: "Do work" });
+		const acceptance = { effects: "advisory", level: "checked", evidence: ["residual-risks"] };
+		const reply = await request(events, "spawn-1", "spawn", { agent: "worker", task: "Do work", acceptance });
 
 		assert.equal(reply.success, true);
 		assert.equal(executedParams.agent, "worker");
 		assert.equal(executedParams.task, "Do work");
+		assert.deepEqual(executedParams.acceptance, acceptance);
 		assert.equal(executedParams.async, true);
 		assert.equal(executedParams.clarify, false);
 		assert.equal((reply as { data: { details?: { asyncId?: string } } }).data.details?.asyncId, "run-1");

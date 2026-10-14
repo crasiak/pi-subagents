@@ -263,6 +263,23 @@ Precedence is by parsed runtime name:
 2. user scope
 3. builtin agents
 
+## Explicit task effects
+
+For every read-only review, research, planning, oracle or context-building leaf,
+pass `acceptance: { effects: "advisory", level: "attested" }` (or a stronger level
+with real evidence). Apply this to the advisory recipes below even when an abbreviated
+snippet omits acceptance. Put it on each task/step/template, not a parallel/chain root
+or group. Role names and no-edit prose no longer remove writer evidence by inference.
+For a writer or conditional fix use `effects: "implementation"`; omitted effects
+conservatively select that evidence family, never additional permission to edit.
+
+Effects do not sandbox tools. Preserve task restrictions, explicit evidence, criteria,
+verify commands and review requirements. Do not manufacture source/test changes for
+an advisory report. Caller requirements raise their necessary rigor floor; pure
+attested defaults remain requests, not checked proof. A runtime that does not support
+`effects` must reject it; report that incompatibility instead of stripping the field,
+disabling gates or installing a candidate for self-acceptance.
+
 ## Running Subagents
 
 ### Single agent
@@ -785,7 +802,7 @@ clarify → validation contract → planner → async worker → parallel async 
 
 The validation contract defines acceptance before code is written: expected behavior, acceptance checks, commands or user flows to exercise, and evidence the worker should return. Keep it lightweight for small tasks, but make it explicit enough that reviewers and validators are checking the intended outcome rather than the worker’s own assumptions.
 
-Use the structured `acceptance` field when the run should carry an explicit acceptance contract. If omitted, subagents infer an effective acceptance policy from role, mode, and risk. Use `level: "checked"` for ordinary writer evidence gates, `level: "verified"` when the runtime should run explicit validation commands, and `level: "reviewed"` only when an independent reviewer result is expected. Do not call a run reviewed just because the worker says it is done; reviewed means a reviewer gate returned a result. Child-reported command success is evidence, not runtime verification.
+Use the structured `acceptance` field when the run should carry an explicit acceptance contract. If omitted, subagents select conservative implementation evidence; mode/risk determine rigor, not permission. Read-only leaves must declare `effects: "advisory"` explicitly. Use `level: "checked"` for ordinary writer evidence gates, `level: "verified"` when the runtime should run explicit validation commands, and `level: "reviewed"` only when an independent reviewer result is expected. Do not call a run reviewed just because the worker says it is done; reviewed means a reviewer gate returned a result. Child-reported command success is evidence, not runtime verification.
 
 The first `worker` implements the approved plan. The parent continues with independent inspection or validation prep while it runs, not parallel edits to the same worktree. When the async worker completes, treat its handoff as the transition into review, not as final completion, unless the user explicitly asked for worker-only work, review-only output, or to stop after implementation. Parallel reviewers inspect the resulting diff from fresh context. Validators check behavior with the best available evidence: commands, tests, browser/CLI interaction, screenshots, logs, or manual reproduction notes. The final `worker` applies synthesized review fixes in forked context, then the parent looks over the final diff before completing. The parent may launch these steps as an initial async chain when the workflow is already clear, or as follow-up subagent runs after each async completion. Initial chains should pass `async: true` so the main chat is unblocked; avoid `clarify: true` unless the user asked for foreground clarification. Do not stop after parallel review unless the user explicitly asked for review-only output or the review surfaced a decision that needs approval first.
 

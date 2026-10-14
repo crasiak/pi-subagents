@@ -1,4 +1,5 @@
 import type { Message } from "@earendil-works/pi-ai";
+import type { ResolvedEffects } from "../../shared/types.ts";
 import { isMutatingBashCommand } from "./long-running-guard.ts";
 
 const REVIEW_ONLY_PATTERNS = [
@@ -85,6 +86,7 @@ const READ_ONLY_BUILTIN_TOOLS = new Set([
 ]);
 
 interface CompletionMutationGuardInput {
+	effects?: ResolvedEffects;
 	agent: string;
 	task: string;
 	messages: Message[];
@@ -171,7 +173,8 @@ export function hasMutationToolCall(messages: Message[]): boolean {
 }
 
 export function evaluateCompletionMutationGuard(input: CompletionMutationGuardInput): CompletionMutationGuardResult {
-	const expectedMutation = toolMutationCapability(input.tools, input.mcpDirectTools).kind === "read-only"
+	const expectedMutation = input.effects?.effective === "advisory"
+		|| toolMutationCapability(input.tools, input.mcpDirectTools).kind === "read-only"
 		? false
 		: expectsImplementationMutation(input.agent, input.task);
 	const attemptedMutation = hasMutationToolCall(input.messages);

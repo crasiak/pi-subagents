@@ -269,7 +269,7 @@ describe("nested control routing", () => {
 				const request = readNestedControlRequests(route)[0];
 				assert.ok(request, "expected a nested resume request");
 				assert.equal(request.action, "resume");
-				assert.equal(request.message, "continue please");
+				assert.equal(request.message, "The existing acceptance/effects contract is unchanged. This follow-up does not authorize wider effects; changed scope requires a fresh invocation.\n\ncontinue please");
 				writeNestedControlResult(route, { ts: Date.now(), requestId: request.requestId, targetRunId: request.targetRunId, ok: true, message: "nested resume accepted" });
 			}, 50);
 

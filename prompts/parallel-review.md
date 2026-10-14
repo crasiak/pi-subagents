@@ -4,6 +4,8 @@ description: Parallel subagents review
 
 Launch parallel reviewers for an adversarial review of the current work.
 
+Declare `acceptance: { effects: "advisory", level: "attested" }` on each read-only reviewer task, not the parallel root. Keep explicit evidence/rigor requirements; never fabricate code/test changes or strip the declaration to bypass an incompatible runtime. A separately authorized writer pass uses `effects: "implementation"`.
+
 Use fresh context, not forked context, unless I explicitly ask for forked context. Reviewers should inspect the repository, relevant instructions, and current diff directly from files and commands. Do not rely on the main conversation history.
 
 Give each reviewer a distinct angle. Generate the angles dynamically from the user's intent, the plan, the implemented code, and the current diff. If I specify angles, use mine. Otherwise, choose the highest-value review angles for this specific work.

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { deadlineFixture } from "./mock-deadline-fixture.mjs";
 
 const queueDir = process.env.MOCK_PI_QUEUE_DIR;
 
@@ -272,6 +273,29 @@ async function maybeWriteStructuredOutput(response, jsonMode) {
 	await writeJsonlLine({ type: "tool_execution_end", toolName: "structured_output" });
 }
 
+async function waitForRelease(fixture, callFile) {
+	const { root, nonce, index } = fixture;
+	if (!path.isAbsolute(root) || typeof nonce !== "string" || !Number.isInteger(index)) throw new Error("Invalid concurrency fixture identity");
+	const ownership = { nonce, index, pid: process.pid, ppid: process.ppid, callFile, at: Date.now() };
+	const owned = path.join(root, `owned-fixture-${index}.json`);
+	fs.writeFileSync(`${owned}.tmp`, JSON.stringify(ownership));
+	fs.renameSync(`${owned}.tmp`, owned);
+	const ready = path.join(root, `ready-${index}.json`);
+	fs.writeFileSync(`${ready}.tmp`, JSON.stringify(ownership));
+	fs.renameSync(`${ready}.tmp`, ready);
+	const end = Date.now() + 20_000;
+	const release = path.join(root, `release-${index}.json`);
+	while (!fs.existsSync(release)) {
+		if (Date.now() > end) {
+			fs.writeFileSync(path.join(root, `watchdog-${index}.json`), JSON.stringify({ failed: true, nonce, index, pid: process.pid }));
+			throw new Error("Concurrency fixture watchdog expired before acknowledgement");
+		}
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	const ack = JSON.parse(fs.readFileSync(release, "utf8"));
+	if (ack.nonce !== nonce || ack.index !== index || ack.pid !== process.pid) throw new Error("Wrong concurrency release identity");
+}
+
 async function main() {
 	if (!queueDir) fail("MOCK_PI_QUEUE_DIR is required.");
 	if (!fs.existsSync(queueDir)) fail(`Mock queue dir does not exist: ${queueDir}`);
@@ -279,15 +303,19 @@ async function main() {
 	const args = process.argv.slice(2);
 	const jsonMode = isJsonMode(args);
 	const response = claimNextResponse(queueDir, args) ?? defaultResponse();
+	const fixture = deadlineFixture(response.deadlineFixture, args);
+	if (fixture) await fixture.beforeReady();
 	if (response.ignoreSigterm === true) {
-		process.on("SIGTERM", () => {});
+		process.on("SIGTERM", () => { fixture?.record("sigterm"); });
 	}
 	writeSessionFile(args);
+	const callFile = path.join(queueDir, `call-${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.json`);
 	fs.writeFileSync(
-		path.join(queueDir, `call-${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.json`),
+		callFile,
 		JSON.stringify({ args, systemPrompts: readSystemPromptRecords(args) }),
 		"utf-8",
 	);
+	if (fixture) await fixture.afterReady(callFile);
 
 	if (typeof response.delay === "number" && response.delay > 0) {
 		await new Promise((resolve) => setTimeout(resolve, response.delay));
@@ -295,6 +323,7 @@ async function main() {
 
 	if (Array.isArray(response.steps) && response.steps.length > 0) {
 		for (const step of response.steps) {
+			if (step?.waitForRelease) await waitForRelease(step.waitForRelease, callFile);
 			if (typeof step?.delay === "number" && step.delay > 0) {
 				await new Promise((resolve) => setTimeout(resolve, step.delay));
 				}
@@ -327,6 +356,7 @@ async function main() {
 		await new Promise((resolve) => setTimeout(resolve, response.keepAliveAfterFinalMessageMs));
 	}
 
+	fixture?.record("natural-exit");
 	exitAfterFlush(typeof response.exitCode === "number" ? response.exitCode : 0);
 }
 

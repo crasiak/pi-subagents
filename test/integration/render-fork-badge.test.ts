@@ -50,6 +50,16 @@ function withTerminalWidth<T>(columns: number, fn: () => T): T {
 }
 
 describe("renderSubagentResult fork indicator", () => {
+	for (const effects of [undefined, { policyVersion: 1, declared: "advisory", effective: "advisory", source: "caller", location: "acceptance.effects" }]) {
+		it(`shows acceptance effects provenance ${effects ? "caller" : "legacy"}`, () => {
+			const widget = renderSubagentResult!({ content: [{ type: "text", text: "Findings" }], details: { mode: "single", results: [{
+				agent: "reviewer", task: "Inspect", exitCode: 0, finalOutput: "Findings", messages: [], usage: emptyUsage,
+				acceptance: { status: "attested", effectiveAcceptance: { ...(effects ? { effects } : {}) } },
+			}] } }, { expanded: false }, theme);
+			assert.match(widget.render(180).join("\n"), effects ? /effects: advisory \(caller\)/ : /effects: legacy\/unknown/);
+		});
+	}
+
 	it("shows [fork] when details are empty but context is fork", () => {
 		const widget = renderSubagentResult!({
 			content: [{ type: "text", text: "Async: reviewer [abc123]" }],

@@ -32,6 +32,25 @@ describe("agent management config parsing", () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
+	it("preserves leaf effects across managed chain create/update/get", () => {
+		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
+		const acceptance = { effects: "advisory", level: "checked", criteria: ["Inspect only"] };
+		const created = handleCreate({ config: { name: "effects", description: "Effects", scope: "project", steps: [{ agent: "reviewer", task: "Inspect", acceptance }] } }, ctx);
+		assert.equal(created.isError, false, readText(created));
+		const filename = path.join(tempDir, ".pi", "chains", "effects.chain.md");
+		assert.match(fs.readFileSync(filename, "utf8"), /acceptance:.*"effects":"advisory"/);
+		const updated = handleUpdate({ chainName: "effects", config: { steps: [{ agent: "reviewer", task: "Inspect again", acceptance }] } }, ctx);
+		assert.equal(updated.isError, false, readText(updated));
+		const detail = handleManagementAction("get", { chainName: "effects" }, ctx);
+		assert.match(readText(detail), /Acceptance:.*"effects":"advisory"/);
+	});
+	it("rejects invalid managed chain effects before saving", () => {
+		const created = handleCreate({ config: { name: "bad-effects", description: "Invalid", scope: "project", steps: [{ agent: "reviewer", task: "Inspect", acceptance: { effects: "auto" } }] } }, { cwd: tempDir, modelRegistry: { getAvailable: () => [] } });
+		assert.equal(created.isError, true);
+		assert.match(readText(created), /effects/);
+		assert.equal(fs.existsSync(path.join(tempDir, ".pi", "chains", "bad-effects.chain.md")), false);
+	});
+
 	it("surfaces JSON parse errors for create config strings", () => {
 		const result = handleCreate(
 			{ config: '{"name":' },

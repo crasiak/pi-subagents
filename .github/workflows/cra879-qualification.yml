@@ -1,0 +1,63 @@
+name: CRA-879 exact-source qualification
+
+on:
+  pull_request:
+    branches: [qualification/CRA-879-base]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cra879-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    if: github.repository == 'crasiak/pi-subagents' && github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        profile: [default, serial]
+        suite: [unit, integration, e2e]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      # Git command-scope config applies BEFORE checkout, including on Windows.
+      GIT_CONFIG_COUNT: '2'
+      GIT_CONFIG_KEY_0: 'core.autocrlf'
+      GIT_CONFIG_VALUE_0: 'false'
+      GIT_CONFIG_KEY_1: 'core.eol'
+      GIT_CONFIG_VALUE_1: 'lf'
+      PYTHONDONTWRITEBYTECODE: '1'
+      CRA879_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout exact candidate head, never merge tree
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Pinned Node24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24.13.0'
+      - name: CI controller Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: CI-only helper checks (no product imports)
+        run: python -B .github/qualification/test_run.py
+      - name: One isolated locked-install and suite execution
+        run: python -B .github/qualification/run.py --suite ${{ matrix.suite }} --profile ${{ matrix.profile }} --out "${{ runner.temp }}/cra879-results"
+      - name: Preserve receipts on success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cra879-${{ matrix.os }}-${{ matrix.profile }}-${{ matrix.suite }}-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/cra879-results/**
+            !${{ runner.temp }}/cra879-results/**/*.pending
+          include-hidden-files: true # Only the fresh, allowlisted qualification output directory.
+          if-no-files-found: error
+          retention-days: 30

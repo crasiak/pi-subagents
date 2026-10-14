@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { ASYNC_DIR, INTERCOM_DETACH_REQUEST_EVENT, RESULTS_DIR, SUBAGENT_ASYNC_STARTED_EVENT } from "../../src/shared/types.ts";
 import type { MockPi } from "../support/helpers.ts";
+import { resolveEffectiveAcceptance } from "../../src/runs/shared/acceptance.ts";
 import {
 	createMockPi,
 	createTempDir,
@@ -509,8 +510,8 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				lastUpdate: 200,
 				cwd: tempDir,
 				steps: [
-					{ agent: "a", status: "complete", sessionFile: firstSession },
-					{ agent: "b", status: "complete", sessionFile: secondSession },
+					{ agent: "a", status: "complete", sessionFile: firstSession, effectiveAcceptance: resolveEffectiveAcceptance({ agentName: "a", explicit: { effects: "advisory" } }) },
+					{ agent: "b", status: "complete", sessionFile: secondSession, effectiveAcceptance: resolveEffectiveAcceptance({ agentName: "b", explicit: { effects: "advisory" } }) },
 				],
 			}, null, 2), "utf-8");
 			const { executor } = makeExecutor({ agents: [makeAgent("a"), makeAgent("b")] });
@@ -550,7 +551,8 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				lastUpdate: 200,
 				cwd: tempDir,
 				sessionFile,
-				steps: [{ agent: "worker", status: "complete" }],
+				// V2's supported-revival fixture carries the frozen policy; legacy refusal is covered separately.
+				steps: [{ agent: "worker", status: "complete", effectiveAcceptance: resolveEffectiveAcceptance({ agentName: "worker", explicit: { effects: "advisory" } }) }],
 			}, null, 2), "utf-8");
 			const { executor } = makeExecutor();
 

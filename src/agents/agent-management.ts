@@ -30,6 +30,7 @@ import { parseFrontmatter } from "./frontmatter.ts";
 import { toModelInfo } from "../shared/model-info.ts";
 import { resolveSubagentModelOverride, type ParentModel } from "../runs/shared/model-fallback.ts";
 import { validateToolBudgetConfig } from "../runs/shared/tool-budget.ts";
+import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import type { Details, ExtensionConfig, ToolBudgetConfig } from "../shared/types.ts";
 import { getProjectConfigDir } from "../shared/utils.ts";
 
@@ -326,6 +327,11 @@ function parseStepList(raw: unknown): { steps?: ChainStepConfig[]; error?: strin
 			if (typeof s.progress === "boolean") step.progress = s.progress;
 			else return { error: `config.steps[${i}].progress must be a boolean.` };
 		}
+		if (hasKey(s, "acceptance")) {
+			const errors = validateAcceptanceInput(s.acceptance, `config.steps[${i}].acceptance`);
+			if (errors.length) return { error: errors.join(" ") };
+			step.acceptance = s.acceptance as ChainStepConfig["acceptance"];
+		}
 		if (hasKey(s, "toolBudget")) {
 			const validation = validateToolBudgetConfig(s.toolBudget, `config.steps[${i}].toolBudget`);
 			if (validation.error) return { error: validation.error };
@@ -555,6 +561,7 @@ function formatChainStepDetail(step: ChainStepConfig, index: number): string[] {
 	else if (step.output) lines.push(`   Output: ${step.output}`);
 	if (step.outputMode) lines.push(`   Output mode: ${step.outputMode}`);
 	if (step.toolBudget) lines.push(`   Tool budget: ${JSON.stringify(step.toolBudget)}`);
+	if (step.acceptance !== undefined) lines.push(`   Acceptance: ${JSON.stringify(step.acceptance)}`);
 	if (step.reads === false) lines.push("   Reads: false");
 	else if (Array.isArray(step.reads) && step.reads.length > 0) lines.push(`   Reads: ${step.reads.join(", ")}`);
 	if (step.model) lines.push(`   Model: ${step.model}`);

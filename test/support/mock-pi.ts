@@ -10,8 +10,10 @@ interface MockPiResponse {
 	delay?: number;
 	keepAliveAfterFinalMessageMs?: number;
 	ignoreSigterm?: boolean;
+	deadlineFixture?: { root: string; nonce: string; runId: string; hold: "before-ready" | "after-ready"; ignoreSigterm?: boolean };
 	jsonl?: unknown[];
 	steps?: Array<{
+		waitForRelease?: { root: string; nonce: string; index: number };
 		delay?: number;
 		jsonl?: unknown[];
 		stderr?: string;
@@ -54,8 +56,9 @@ function listQueueFiles(queueDir: string, prefix: string): string[] {
 	}
 }
 
-export function createMockPi(): MockPi {
-	const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mock-cli-"));
+export function createMockPi(options: { rootDir?: string; preserve?: boolean } = {}): MockPi {
+	const rootDir = options.rootDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "pi-mock-cli-"));
+	if (options.rootDir) fs.mkdirSync(rootDir);
 	const queueDir = path.join(rootDir, "queue");
 	const binDir = path.join(rootDir, "bin");
 	ensureDir(queueDir);
@@ -100,7 +103,7 @@ export function createMockPi(): MockPi {
 				else process.argv[1] = originalArgv1;
 			}
 			try {
-				fs.rmSync(rootDir, { recursive: true, force: true });
+				if (!options.preserve) fs.rmSync(rootDir, { recursive: true, force: true });
 			} catch {}
 		},
 		onCall(response) {

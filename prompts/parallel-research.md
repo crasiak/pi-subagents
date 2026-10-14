@@ -4,6 +4,8 @@ description: Parallel subagents research
 
 Launch parallel research subagents to build a grounded answer to the current question or decision.
 
+Declare `acceptance: { effects: "advisory", level: "attested" }` on each researcher/scout leaf, not the parallel root. Preserve stronger caller requirements. No source/test changes are implied by a research artifact; report incompatible runtimes rather than disabling gates or stripping effects.
+
 Use fresh context, not forked context, unless I explicitly ask for forked context. Researchers and scouts should inspect sources directly instead of relying on the main conversation history.
 
 Use a combination of `researcher` and `scout` subagents:

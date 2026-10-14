@@ -12,6 +12,7 @@ import {
 	type ExtensionConfig,
 } from "../../shared/types.ts";
 import type { SubagentParamsLike } from "../foreground/subagent-executor.ts";
+import { validateAcceptanceRequest } from "../shared/acceptance-contract.ts";
 
 export const SCHEDULED_RUNS_DIR = path.join(TEMP_ROOT_DIR, "scheduled-subagent-runs");
 export const SCHEDULED_RUN_ACTIONS = ["schedule", "schedule-list", "schedule-status", "schedule-cancel"] as const;
@@ -34,12 +35,19 @@ type ScheduledRunJob = {
 	cwd: string;
 	sessionId: string;
 	params: SubagentParamsLike;
+	acceptancePolicyVersion?: 1;
 	lastRunId?: string;
 	lastAsyncDir?: string;
 	lastError?: string;
 	firedAt?: number;
 	canceledAt?: number;
 };
+
+function scheduledPolicyError(job: ScheduledRunJob): string {
+	return job.acceptancePolicyVersion !== 1
+		? "Unsupported or legacy acceptance policy for queued work; create a fresh explicitly reviewed schedule."
+		: validateAcceptanceRequest(job.params).join(" ");
+}
 
 type ScheduledRunStoreData = {
 	version: 1;
@@ -228,6 +236,8 @@ function sanitizeScheduledParams(params: SubagentParamsLike): { params?: Subagen
 	if (params.context === "fork") return { error: "Scheduled subagent runs require fresh context. Forked parent-session context is not safe at fire time." };
 	if (params.async === false) return { error: "Scheduled subagent runs are always async; omit async or set async: true." };
 	if (params.clarify === true) return { error: "Scheduled subagent runs cannot open clarify UI; omit clarify or set clarify: false." };
+	const acceptanceErrors = validateAcceptanceRequest(params);
+	if (acceptanceErrors.length) return { error: acceptanceErrors.join(" ") };
 
 	const {
 		action: _action,
@@ -327,6 +337,7 @@ export class ScheduledRunManager {
 			cwd: ctx.cwd,
 			sessionId,
 			params: executionParams,
+			acceptancePolicyVersion: 1,
 		};
 		store.mutate((data) => {
 			data.jobs.push(job);
@@ -401,6 +412,18 @@ export class ScheduledRunManager {
 	private rearmScheduledJobs(): void {
 		const store = this.requireStore();
 		const now = this.now();
+		if (store.list().some((job) => job.state === "scheduled" && scheduledPolicyError(job))) {
+			store.mutate((data) => {
+				for (const job of data.jobs) {
+					if (job.state !== "scheduled") continue;
+					const error = scheduledPolicyError(job);
+					if (!error) continue;
+					job.state = "failed";
+					job.updatedAt = now;
+					job.lastError = error;
+				}
+			});
+		}
 		const maxLatenessMs = resolveMaxLatenessMs(this.deps.config);
 		const dueToMiss = store.list().filter((job) => job.state === "scheduled" && job.runAt + maxLatenessMs < now);
 		if (dueToMiss.length > 0) {
@@ -440,6 +463,17 @@ export class ScheduledRunManager {
 		// A timer capped at MAX_TIMER_DELAY_MS may fire before runAt for far-future schedules; re-arm and wait.
 		if (now < job.runAt) {
 			this.arm(job);
+			return;
+		}
+		const policyError = scheduledPolicyError(job);
+		if (policyError) {
+			store.mutate((data) => {
+				const stored = data.jobs.find((candidate) => candidate.id === jobId);
+				if (!stored || stored.state !== "scheduled") return;
+				stored.state = "failed";
+				stored.updatedAt = now;
+				stored.lastError = policyError;
+			});
 			return;
 		}
 		const maxLatenessMs = resolveMaxLatenessMs(this.deps.config);

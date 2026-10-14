@@ -81,6 +81,15 @@ function parseStepBody(agent: string, sectionBody: string): ChainStepConfig {
 			else if (rawValue === "false") step.progress = false;
 			continue;
 		}
+		if (key === "acceptance") {
+			let parsed: unknown;
+			try { parsed = JSON.parse(rawValue); }
+			catch { parsed = rawValue; }
+			const errors = validateAcceptanceInput(parsed, `acceptance for step '${agent}'`);
+			if (errors.length) throw new Error(errors.join(" "));
+			step.acceptance = parsed as ChainStepConfig["acceptance"];
+			continue;
+		}
 		if (key === "toolbudget") {
 			let parsed: unknown;
 			try {
@@ -172,7 +181,8 @@ export function parseJsonChain(content: string, source: AgentSource, filePath: s
 		}
 		const stepRecord = step as Record<string, unknown>;
 		if (stepRecord.toolBudget !== undefined) validateJsonChainToolBudget(stepRecord.toolBudget, `step ${i + 1} toolBudget`);
-		const acceptanceErrors = validateAcceptanceInput(stepRecord.acceptance, `step ${i + 1} acceptance`);
+		const scope = Array.isArray(stepRecord.parallel) ? "container" : stepRecord.parallel && typeof stepRecord.parallel === "object" ? "dynamic-group" : "leaf";
+		const acceptanceErrors = validateAcceptanceInput(stepRecord.acceptance, `step ${i + 1} acceptance`, scope);
 		if (acceptanceErrors.length > 0) {
 			throw new Error(`Invalid JSON chain '${filePath}': ${acceptanceErrors.join(" ")}`);
 		}
@@ -253,6 +263,11 @@ export function serializeChain(config: ChainConfig): string {
 
 	for (let i = 0; i < config.steps.length; i++) {
 		const step = config.steps[i]!;
+		if (step.parallel !== undefined || step.expand !== undefined || step.collect !== undefined || (step.outputSchema && typeof step.outputSchema === "object")) {
+			throw new Error("This chain cannot round-trip through .chain.md; use .chain.json.");
+		}
+		const acceptanceErrors = validateAcceptanceInput(step.acceptance, `step ${i + 1} acceptance`);
+		if (acceptanceErrors.length) throw new Error(acceptanceErrors.join(" "));
 		lines.push(`## ${step.agent}`);
 		if (step.output === false) lines.push("output: false");
 		else if (step.output) lines.push(`output: ${step.output}`);
@@ -268,6 +283,7 @@ export function serializeChain(config: ChainConfig): string {
 		else if (Array.isArray(step.skills) && step.skills.length > 0) lines.push(`skills: ${step.skills.join(", ")}`);
 		if (step.progress !== undefined) lines.push(`progress: ${step.progress ? "true" : "false"}`);
 		if (step.toolBudget !== undefined) lines.push(`toolBudget: ${JSON.stringify(step.toolBudget)}`);
+		if (step.acceptance !== undefined) lines.push(`acceptance: ${JSON.stringify(step.acceptance)}`);
 		lines.push("");
 		lines.push(step.task ?? "");
 		if (i < config.steps.length - 1) lines.push("");
