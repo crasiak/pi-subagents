@@ -88,6 +88,9 @@ function text(result: Awaited<ReturnType<ReturnType<typeof executorWithKill>["ex
 	return result.content[0]?.type === "text" ? result.content[0].text : "";
 }
 
+// CRA-617 continuation keeps the original contract and the exact caller follow-up.
+const CONTRACT_REMINDER = "The existing acceptance/effects contract is unchanged. This follow-up does not authorize wider effects; changed scope requires a fresh invocation.\n\n";
+
 describe("async interrupt action", () => {
 	it("queues steering for a running async child", async () => {
 		const state = createState();
@@ -101,7 +104,7 @@ describe("async interrupt action", () => {
 			assert.match(text(result), new RegExp(`Steering queued for async run ${runId}`));
 			const requests = consumeSteerRequests(asyncDir);
 			assert.equal(requests.length, 1);
-			assert.equal(requests[0]?.message, "Focus on tests.");
+			assert.equal(requests[0]?.message, CONTRACT_REMINDER + "Focus on tests.");
 			assert.equal(requests[0]?.source, "steer-action");
 			assert.equal(requests[0]?.targetIndex, undefined);
 		} finally {
@@ -121,7 +124,7 @@ describe("async interrupt action", () => {
 			assert.match(text(result), new RegExp(`Steering queued for async run ${runId}`));
 			const requests = consumeSteerRequests(asyncDir);
 			assert.equal(requests.length, 1);
-			assert.equal(requests[0]?.message, "Focus on validation.");
+			assert.equal(requests[0]?.message, CONTRACT_REMINDER + "Focus on validation.");
 		} finally {
 			cleanup(runId, asyncDir);
 		}
@@ -151,7 +154,7 @@ describe("async interrupt action", () => {
 			assert.equal(result.isError, undefined);
 			const requests = consumeSteerRequests(asyncDir);
 			assert.equal(requests.length, 1);
-			assert.equal(requests[0]?.message, "Use the new API.");
+			assert.equal(requests[0]?.message, CONTRACT_REMINDER + "Use the new API.");
 			assert.equal(requests[0]?.targetIndex, 1);
 		} finally {
 			cleanup(runId, asyncDir);

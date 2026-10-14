@@ -70,7 +70,8 @@ import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
 import { ChainOutputValidationError, outputEntryFromResult, resolveOutputReferences, validateChainOutputBindings } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
 import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection, type DynamicCollectedResult } from "../shared/dynamic-fanout.ts";
-import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, resolveEffectiveAcceptance } from "../shared/acceptance.ts";
+import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, resolveEffectiveAcceptance, resolveGroupAcceptance } from "../shared/acceptance.ts";
+import { acceptanceLocation } from "../shared/acceptance-location.ts";
 import type { ChainOutputMap } from "../../shared/types.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 
@@ -92,6 +93,7 @@ interface ChainExecutionDetailsInput {
 }
 
 interface ParallelChainRunInput {
+	dynamic?: boolean;
 	step: ParallelStep;
 	parallelTemplates: string[];
 	parallelBehaviors: ResolvedStepBehavior[];
@@ -331,7 +333,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				skills: behavior.skills === false ? [] : behavior.skills,
 				structuredOutput: structuredRuntime,
 				acceptance: task.acceptance,
-				acceptanceContext: { mode: "chain" },
+				acceptanceContext: { mode: "chain", dynamic: input.dynamic, task: task.task ?? "", effectsLocation: acceptanceLocation(task) },
 				timeoutMs: input.timeoutMs,
 				deadlineAt: input.deadlineAt,
 				turnBudget: input.turnBudget,
@@ -866,12 +868,9 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				};
 				dynamicGroupStatuses[stepIndex] = { status: "completed" };
 				if (step.acceptance !== undefined) {
-					const effectiveGroupAcceptance = resolveEffectiveAcceptance({
-						explicit: step.acceptance,
-						agentName: step.parallel.agent,
-						task: step.parallel.task ?? originalTask,
-						mode: "chain",
-						dynamicGroup: true,
+					const effectiveGroupAcceptance = resolveGroupAcceptance({
+						explicit: step.acceptance, children: [], location: `chain[${stepIndex}].acceptance`,
+						template: resolveEffectiveAcceptance({ agentName: step.parallel.agent, task: step.parallel.task ?? originalTask, explicit: step.parallel.acceptance, dynamic: true, effectsLocation: acceptanceLocation(step.parallel) }),
 					});
 					const groupAcceptance = await evaluateAcceptance({
 						acceptance: effectiveGroupAcceptance,
@@ -919,6 +918,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 			createParallelDirs(chainDir, stepIndex, dynamicParallelStep.parallel.length, dynamicParallelStep.parallel.map((task) => task.agent));
 			const parallelResults = await runParallelChainTasks({
 				step: dynamicParallelStep,
+				dynamic: true,
 				parallelTemplates,
 				parallelBehaviors,
 				agents,
@@ -1031,12 +1031,9 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				stepIndex,
 			};
 			dynamicGroupStatuses[stepIndex] = { status: "completed" };
-			const effectiveGroupAcceptance = resolveEffectiveAcceptance({
-				explicit: step.acceptance,
-				agentName: step.parallel.agent,
-				task: step.parallel.task ?? originalTask,
-				mode: "chain",
-				dynamicGroup: true,
+			const effectiveGroupAcceptance = resolveGroupAcceptance({
+				explicit: step.acceptance, location: `chain[${stepIndex}].acceptance`,
+				children: parallelResults.map((result, index) => ({ id: `step-${stepIndex}-item-${materialized.items[index].idKey}`, acceptance: result.acceptance?.effectiveAcceptance })),
 			});
 			const groupAcceptance = await evaluateAcceptance({
 				acceptance: effectiveGroupAcceptance,
@@ -1193,7 +1190,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				skills: behavior.skills === false ? [] : behavior.skills,
 				structuredOutput: structuredRuntime,
 				acceptance: seqStep.acceptance,
-				acceptanceContext: { mode: "chain" },
+				acceptanceContext: { mode: "chain", task: seqStep.task ?? "", effectsLocation: acceptanceLocation(seqStep) },
 				timeoutMs: params.timeoutMs,
 				deadlineAt,
 				turnBudget: params.turnBudget,

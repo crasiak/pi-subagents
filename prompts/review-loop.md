@@ -4,6 +4,8 @@ description: Review/fix loop until clean
 
 Run a parent-orchestrated review loop for the requested work.
 
+Declare `acceptance: { effects: "advisory", level: "attested" }` on each read-only reviewer leaf and `effects: "implementation"` on authorized writer leaves. Retain stronger caller evidence/rigor requirements. Do not set effects on group/root acceptance, fabricate evidence, disable gates, or strip the field to bypass an incompatible runtime.
+
 Use the `subagent` tool. Keep the parent session as the loop controller and final decision-maker. Child subagents must receive concrete role-specific tasks; they must not run subagents or manage the loop themselves unless the parent intentionally selected an explicit fanout agent whose builtin `tools` includes `subagent` for that assigned fanout.
 
 Default to a maximum of 3 review rounds unless I specify a different cap. Count a review round each time fresh-context reviewers inspect the current diff after a worker pass. Stop early when reviewers find no blockers or fixes worth doing now.

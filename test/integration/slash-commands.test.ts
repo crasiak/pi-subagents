@@ -844,6 +844,7 @@ reads: input.md, notes.md
 model: openai/gpt-5.5
 skills: research, audit
 progress: true
+acceptance: {"effects":"advisory","level":"checked","criteria":["Inspect only"]}
 
 Gather context
 `);
@@ -853,6 +854,7 @@ Gather context
 			assert.deepEqual((params as { chain?: unknown[] }).chain?.[0], {
 				agent: "scout",
 				task: "Gather context",
+				acceptance: { effects: "advisory", level: "checked", criteria: ["Inspect only"] },
 				output: "context.md",
 				outputMode: "file-only",
 				reads: ["input.md", "notes.md"],

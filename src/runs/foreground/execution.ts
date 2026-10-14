@@ -69,6 +69,7 @@ import {
 	summarizeRecentMutatingFailures,
 } from "../shared/long-running-guard.ts";
 import { acceptanceFailureMessage, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { persistAcceptanceSnapshot, requireLeafAcceptanceSnapshot } from "../shared/acceptance-contract.ts";
 import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, shouldAbortForTurnBudget, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
 import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
 
@@ -183,6 +184,8 @@ async function runSingleAttempt(
 		attemptNotes: string[];
 		outputSnapshot?: SingleOutputSnapshot;
 		originalTask?: string;
+		effectiveAcceptance: ResolvedAcceptanceConfig;
+		acceptanceSnapshotPath: string;
 	},
 ): Promise<SingleResult> {
 	const effectiveThinking = options.thinkingOverride ?? agent.thinking;
@@ -221,6 +224,8 @@ async function runSingleAttempt(
 	});
 
 	const result: SingleResult = {
+		effectiveAcceptance: shared.effectiveAcceptance,
+		acceptanceSnapshotPath: shared.acceptanceSnapshotPath,
 		agent: agent.name,
 		task: shared.originalTask ?? task,
 		exitCode: 0,
@@ -934,6 +939,7 @@ async function runSingleAttempt(
 	}
 	const completionGuard = result.exitCode === 0 && !result.error && agent.completionGuard !== false
 		? evaluateCompletionMutationGuard({
+			effects: shared.effectiveAcceptance.effects,
 			agent: agent.name,
 			task: shared.originalTask ?? task,
 			messages: result.messages,
@@ -1025,15 +1031,17 @@ export async function runSync(
 	}
 
 	const shareEnabled = options.share === true;
-	const effectiveAcceptance = resolveEffectiveAcceptance({
+	const effectiveAcceptance = options.resolvedAcceptance ? requireLeafAcceptanceSnapshot(options.resolvedAcceptance) : resolveEffectiveAcceptance({
 		explicit: options.acceptance,
+		effectsLocation: options.acceptanceContext?.effectsLocation,
 		agentName,
-		task,
+		task: options.acceptanceContext?.task ?? task,
 		mode: options.acceptanceContext?.mode ?? "single",
 		async: options.acceptanceContext?.async,
 		dynamic: options.acceptanceContext?.dynamic,
 		dynamicGroup: options.acceptanceContext?.dynamicGroup,
 	});
+	const acceptanceSnapshotPath = persistAcceptanceSnapshot(effectiveAcceptance);
 	const acceptancePrompt = formatAcceptancePrompt(effectiveAcceptance);
 	const taskWithAcceptance = acceptancePrompt ? `${task}\n${acceptancePrompt}` : task;
 	const sessionEnabled = Boolean(options.sessionFile || options.sessionDir) || shareEnabled;
@@ -1116,6 +1124,8 @@ export async function runSync(
 			attemptNotes,
 			outputSnapshot,
 			originalTask: task,
+			effectiveAcceptance,
+			acceptanceSnapshotPath,
 		});
 		lastResult = result;
 		if (result.model) attemptedModels.push(result.model);

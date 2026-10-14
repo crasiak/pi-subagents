@@ -368,7 +368,9 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 				const steeringText = formatSteeringSummary(step);
 				const steeringSuffix = steeringText ? `, steering: ${steeringText}` : "";
 				const errorText = step.error ? `, error: ${step.error}` : "";
-				const acceptanceText = step.acceptance?.status ? `, acceptance: ${step.acceptance.status}` : "";
+				const effects = step.effectiveAcceptance?.effects ?? step.acceptance?.effectiveAcceptance?.effects;
+				const effectsText = effects ? `, effects: ${effects.effective} (${effects.source})` : step.acceptance ? ", effects: legacy/unknown" : "";
+				const acceptanceText = (step.acceptance?.status ? `, acceptance: ${step.acceptance.status}` : "") + effectsText;
 				const budgetText = step.turnBudget ? `, turn budget: ${step.turnBudget.turnCount}/${step.turnBudget.maxTurns}+${step.turnBudget.graceTurns} (${step.turnBudget.outcome})` : "";
 				const display = step.label ? `${step.label} (${step.agent})` : step.agent;
 				const phase = step.phase ? `[${step.phase}] ` : "";

@@ -267,12 +267,14 @@ function firstOutputLine(text: string): string {
 }
 
 function resultStatusLine(result: Details["results"][number], output: string): string {
-	if (result.detached) return result.detachedReason ? `Detached: ${result.detachedReason}` : "Detached";
-	if (result.interrupted) return "Paused";
-	if (result.exitCode !== 0) return `Error: ${result.error ?? (firstOutputLine(output) || `exit ${result.exitCode}`)}`;
-	if (result.acceptance?.status && result.acceptance.status !== "not-required") return `Done · acceptance: ${result.acceptance.status}`;
-	if (hasEmptyTextOutputWithoutOutputTarget(result.task, output)) return "Done (no text output)";
-	return "Done";
+	const effects = result.effectiveAcceptance?.effects ?? result.acceptance?.effectiveAcceptance?.effects;
+	const suffix = effects ? ` · effects: ${effects.effective} (${effects.source})` : result.acceptance ? " · effects: legacy/unknown" : "";
+	if (result.detached) return (result.detachedReason ? `Detached: ${result.detachedReason}` : "Detached") + suffix;
+	if (result.interrupted) return "Paused" + suffix;
+	if (result.exitCode !== 0) return `Error: ${result.error ?? (firstOutputLine(output) || `exit ${result.exitCode}`)}` + suffix;
+	if (result.acceptance?.status) return `Done · acceptance: ${result.acceptance.status}` + suffix;
+	if (hasEmptyTextOutputWithoutOutputTarget(result.task, output)) return "Done (no text output)" + suffix;
+	return "Done" + suffix;
 }
 
 function resultGlyph(result: Details["results"][number], output: string, theme: Theme, running = result.progress?.status === "running", seed = progressRunningSeed(result.progress ?? result.progressSummary), frame?: number): string {

@@ -36,7 +36,8 @@ import { buildAsyncRunnerSteps, executeAsyncChain, executeAsyncSingle, formatAsy
 import type { ScheduledRunAction } from "../background/scheduled-runs.ts";
 import { enqueueChainAppendRequest, readPendingChainAppendRequests, runnerStepOutputNames } from "../background/chain-append.ts";
 import { ChainOutputValidationError, validateChainOutputBindingsWithContext } from "../shared/chain-outputs.ts";
-import { validateAcceptanceInput } from "../shared/acceptance.ts";
+import { immutableContractFollowUp, requireLeafAcceptanceSnapshot, selectLeafAcceptanceSnapshot, validateAcceptanceRequest } from "../shared/acceptance-contract.ts";
+import { acceptanceLocation, withAcceptanceLocation } from "../shared/acceptance-location.ts";
 import { createForkContextResolver } from "../../shared/fork-context.ts";
 import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
@@ -339,6 +340,7 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 				...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
 				...(result.finalOutput ? { finalOutput: result.finalOutput } : {}),
 				...(result.sessionFile ? { sessionFile: result.sessionFile } : {}),
+				...(result.effectiveAcceptance || result.acceptance?.effectiveAcceptance ? { effectiveAcceptance: result.effectiveAcceptance ?? result.acceptance?.effectiveAcceptance } : {}),
 				...(result.artifactPaths ? { artifactPaths: result.artifactPaths } : {}),
 				...(result.transcriptPath ? { transcriptPath: result.transcriptPath } : {}),
 				...(result.transcriptError ? { transcriptError: result.transcriptError } : {}),
@@ -370,6 +372,7 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		...(input.result.exitCode !== undefined ? { exitCode: input.result.exitCode } : {}),
 		...(input.result.finalOutput ? { finalOutput: input.result.finalOutput } : {}),
 		...(input.result.sessionFile ? { sessionFile: input.result.sessionFile } : {}),
+		...(input.result.effectiveAcceptance || input.result.acceptance?.effectiveAcceptance ? { effectiveAcceptance: input.result.effectiveAcceptance ?? input.result.acceptance?.effectiveAcceptance } : {}),
 		...(input.result.artifactPaths ? { artifactPaths: input.result.artifactPaths } : {}),
 		...(input.result.transcriptPath ? { transcriptPath: input.result.transcriptPath } : {}),
 		...(input.result.transcriptError ? { transcriptError: input.result.transcriptError } : {}),
@@ -378,7 +381,7 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 	trimRememberedForegroundRuns(state);
 }
 
-function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string } | undefined {
+function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string; effectiveAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig } | undefined {
 	const requested = (params.id ?? params.runId)?.trim();
 	if (!requested || !state.foregroundRuns?.size) return undefined;
 	const direct = state.foregroundRuns.get(requested);
@@ -396,12 +399,13 @@ function resolveForegroundResumeTarget(params: SubagentParamsLike, state: Subage
 	if (path.extname(child.sessionFile) !== ".jsonl") throw new Error(`Foreground run '${run.runId}' child ${index} session file must be a .jsonl file: ${child.sessionFile}`);
 	const sessionFile = path.resolve(child.sessionFile);
 	if (!fs.existsSync(sessionFile)) throw new Error(`Foreground run '${run.runId}' child ${index} session file does not exist: ${child.sessionFile}`);
-	return { runId: run.runId, mode: run.mode, state: "complete", agent: child.agent, index, intercomTarget: resolveSubagentIntercomTarget(run.runId, child.agent, index), cwd: run.cwd, sessionFile };
+	return { runId: run.runId, mode: run.mode, state: "complete", agent: child.agent, index, intercomTarget: resolveSubagentIntercomTarget(run.runId, child.agent, index), cwd: run.cwd, sessionFile, ...(child.effectiveAcceptance ? { effectiveAcceptance: child.effectiveAcceptance } : {}) };
 }
 
 type AsyncResumeSourceTarget = ReturnType<typeof resolveAsyncResumeTarget> & { source: "async" };
 type ForegroundResumeSourceTarget = NonNullable<ReturnType<typeof resolveForegroundResumeTarget>> & { kind: "revive"; source: "foreground" };
 type NestedResumeSourceTarget = {
+	effectiveAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 	kind: "revive";
 	source: "nested";
 	runId: string;
@@ -617,7 +621,7 @@ function steerAsyncRun(input: {
 			};
 		}
 	}
-	requestAsyncSteer(input.location.asyncDir, { message: input.message, targetIndex: input.index, source: "steer-action" });
+	requestAsyncSteer(input.location.asyncDir, { message: immutableContractFollowUp(input.message), targetIndex: input.index, source: "steer-action" });
 	const tracked = input.state.asyncJobs.get(status.runId);
 	if (tracked) tracked.updatedAt = Date.now();
 	const childText = input.index !== undefined ? ` child ${input.index}` : " running child";
@@ -862,7 +866,18 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 	if (!agent) throw new Error(`Could not determine child agent for nested run '${run.id}'.`);
 	const state = run.state === "complete" || run.state === "failed" || run.state === "paused" ? run.state : "failed";
 	const asyncDir = resolveNestedAsyncDir(match.match.rootRunId, run);
+	let effectiveAcceptance: import("../../shared/types.ts").ResolvedAcceptanceConfig | undefined;
+	if (asyncDir && fs.existsSync(path.join(asyncDir, "status.json"))) {
+		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf8"));
+		if (Array.isArray(status.steps) && status.steps.length === 1 && status.steps[0].agent === agent) {
+			const step = status.steps[0];
+			if (step.effectiveAcceptance || step.acceptance?.effectiveAcceptance) {
+				effectiveAcceptance = selectLeafAcceptanceSnapshot(step.effectiveAcceptance, step.acceptance?.effectiveAcceptance);
+			}
+		}
+	}
 	return {
+		...(effectiveAcceptance ? { effectiveAcceptance } : {}),
 		kind: "revive",
 		source: "nested",
 		runId: run.id,
@@ -925,7 +940,7 @@ function directNestedAsyncSteer(input: { target: ResolvedSubagentRunId & { kind:
 		const step = steps[input.index];
 		if (step && step.status !== "running" && step.status !== "pending") return { content: [{ type: "text", text: `Nested async run ${run.id} child ${input.index} is ${step.status} and cannot be steered.` }], isError: true, details: { mode: "management", results: [] } };
 	}
-	requestAsyncSteer(asyncDir, { message: input.message, targetIndex: input.index, source: "nested-steer" });
+	requestAsyncSteer(asyncDir, { message: immutableContractFollowUp(input.message), targetIndex: input.index, source: "nested-steer" });
 	return { content: [{ type: "text", text: `Steering queued for nested async run ${run.id}. Delivery requires a live Pi child session that supports mid-run steering.` }], details: { mode: "management", results: [] } };
 }
 
@@ -962,7 +977,10 @@ async function resumeAsyncRun(input: {
 	ctx: ExtensionContext;
 	deps: ExecutorDeps;
 }): Promise<AgentToolResult<Details>> {
-	const followUp = (input.params.message ?? input.params.task ?? "").trim();
+	const rawFollowUp = (input.params.message ?? input.params.task ?? "").trim();
+	const followUp = rawFollowUp ? immutableContractFollowUp(rawFollowUp) : "";
+	const acceptanceErrors = validateAcceptanceRequest(input.params);
+	if (acceptanceErrors.length) return { content: [{ type: "text", text: acceptanceErrors.join(" ") }], isError: true, details: { mode: "management", results: [] } };
 	const attachChain = (input.params.chain?.length ?? 0) > 0 ? input.params.chain as ChainStep[] : undefined;
 	if (!followUp && !attachChain) {
 		return {
@@ -1150,8 +1168,12 @@ async function resumeAsyncRun(input: {
 	const runId = randomUUID().slice(0, 8);
 	const artifactConfig: ArtifactConfig = { ...DEFAULT_ARTIFACT_CONFIG, enabled: input.params.artifacts !== false };
 	const artifactsDir = getArtifactsDir(parentSessionFile, effectiveCwd);
+	let resolvedAcceptance: import("../../shared/types.ts").ResolvedAcceptanceConfig;
+	try { resolvedAcceptance = requireLeafAcceptanceSnapshot(target.effectiveAcceptance); }
+	catch (error) { return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true, details: { mode: "management", results: [] } }; }
 	const availableModels = input.ctx.modelRegistry.getAvailable().map(toModelInfo);
 	const result = executeAsyncSingle(runId, {
+		resolvedAcceptance,
 		agent: target.agent,
 		task: buildRevivedAsyncTask(target, followUp),
 		agentConfig,
@@ -1414,22 +1436,7 @@ function validateExecutionChainBindings(params: SubagentParamsLike, dynamicFanou
 }
 
 function validateExecutionAcceptance(params: SubagentParamsLike): string[] {
-	const errors: string[] = [];
-	errors.push(...validateAcceptanceInput(params.acceptance, "acceptance"));
-	for (const [index, task] of (params.tasks ?? []).entries()) {
-		errors.push(...validateAcceptanceInput(task.acceptance, `tasks[${index}].acceptance`));
-	}
-	for (const [stepIndex, step] of (params.chain ?? []).entries()) {
-		errors.push(...validateAcceptanceInput((step as { acceptance?: unknown }).acceptance, `chain[${stepIndex}].acceptance`));
-		if (isParallelStep(step)) {
-			for (const [taskIndex, task] of step.parallel.entries()) {
-				errors.push(...validateAcceptanceInput(task.acceptance, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
-			}
-		} else if (isDynamicParallelStep(step)) {
-			errors.push(...validateAcceptanceInput(step.parallel.acceptance, `chain[${stepIndex}].parallel.acceptance`));
-		}
-	}
-	return errors;
+	return validateAcceptanceRequest(params);
 }
 
 function getRequestedModeLabel(params: SubagentParamsLike): Details["mode"] {
@@ -1544,7 +1551,7 @@ function expandTopLevelTaskCounts(tasks: TaskParam[]): { tasks?: TaskParam[]; er
 		}
 		const { count, ...concreteTask } = task;
 		for (let repeat = 0; repeat < (rawCount ?? 1); repeat++) {
-			expanded.push({ ...concreteTask });
+			expanded.push(withAcceptanceLocation(concreteTask, `tasks[${taskIndex}].acceptance.effects`));
 		}
 	}
 	return { tasks: expanded };
@@ -1555,7 +1562,9 @@ function expandChainParallelCounts(chain: ChainStep[]): { chain?: ChainStep[]; e
 	for (let stepIndex = 0; stepIndex < chain.length; stepIndex++) {
 		const step = chain[stepIndex]!;
 		if (!isParallelStep(step)) {
-			expandedChain.push(step);
+			expandedChain.push(isDynamicParallelStep(step)
+				? { ...step, parallel: withAcceptanceLocation(step.parallel, `chain[${stepIndex}].parallel.acceptance.effects`) }
+				: withAcceptanceLocation(step, `chain[${stepIndex}].acceptance.effects`));
 			continue;
 		}
 		const expandedParallel = [];
@@ -1567,7 +1576,7 @@ function expandChainParallelCounts(chain: ChainStep[]): { chain?: ChainStep[]; e
 			}
 			const { count, ...concreteTask } = task;
 			for (let repeat = 0; repeat < (rawCount ?? 1); repeat++) {
-				expandedParallel.push({ ...concreteTask });
+				expandedParallel.push(withAcceptanceLocation(concreteTask, `chain[${stepIndex}].parallel[${taskIndex}].acceptance.effects`));
 			}
 		}
 		expandedChain.push({ ...step, parallel: expandedParallel });
@@ -1576,14 +1585,14 @@ function expandChainParallelCounts(chain: ChainStep[]): { chain?: ChainStep[]; e
 }
 
 function normalizeRepeatedParallelCounts(params: SubagentParamsLike): { params?: SubagentParamsLike; error?: AgentToolResult<Details> } {
-	if (params.tasks) {
+	if (params.tasks?.length) {
 		const expandedTasks = expandTopLevelTaskCounts(params.tasks);
 		if (expandedTasks.error) {
 			return { error: buildRequestedModeError(params, expandedTasks.error) };
 		}
 		return { params: { ...params, tasks: expandedTasks.tasks } };
 	}
-	if (params.chain) {
+	if (params.chain?.length) {
 		const expandedChain = expandChainParallelCounts(params.chain);
 		if (expandedChain.error) {
 			return { error: buildRequestedModeError(params, expandedChain.error) };
@@ -1827,7 +1836,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			resolveSubagentModelOverride(task.model ?? agentConfigs[index]?.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope, source: task.model ? "explicit" : "inherited" }),
 		);
 		const skillOverrides = params.tasks.map((task) => normalizeSkillInput(task.skill));
-		const parallelTasks = params.tasks.map((task, index) => ({
+		const parallelTasks = params.tasks.map((task, index) => withAcceptanceLocation({
 			agent: task.agent,
 			task: shouldForkAgent(contextPolicy, task.agent) ? wrapForkTask(task.task) : task.task,
 			cwd: task.cwd,
@@ -1839,7 +1848,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			...(task.progress !== undefined ? { progress: task.progress } : {}),
 			...(task.toolBudget !== undefined ? { toolBudget: task.toolBudget } : {}),
 			...(task.acceptance !== undefined ? { acceptance: task.acceptance } : {}),
-		}));
+		}, acceptanceLocation(task)));
 		return executeAsyncChain(id, {
 			chain: [{
 				parallel: parallelTasks,
@@ -2333,7 +2342,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			modelScope: input.modelScope,
 			skills: effectiveSkills === false ? [] : effectiveSkills,
 			acceptance: task.acceptance,
-			acceptanceContext: { mode: "parallel" },
+			acceptanceContext: { mode: "parallel", task: input.taskTexts[index], effectsLocation: acceptanceLocation(task) },
 			timeoutMs: input.timeoutMs,
 			deadlineAt: input.deadlineAt,
 			turnBudget: input.turnBudget,
@@ -2541,6 +2550,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 					...(progress !== undefined ? { progress } : {}),
 					...(t.toolBudget !== undefined ? { toolBudget: t.toolBudget } : {}),
 					...(t.acceptance !== undefined ? { acceptance: t.acceptance } : {}),
+					...withAcceptanceLocation({}, acceptanceLocation(t)),
 				};
 			});
 			return executeAsyncChain(id, {
@@ -2960,7 +2970,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		modelScope: data.modelScope,
 		skills: effectiveSkills,
 		acceptance: params.acceptance,
-		acceptanceContext: { mode: "single" },
+		acceptanceContext: { mode: "single", task: cleanTask },
 		onDetachedExit: (result) => updateRememberedForegroundChild(deps.state, { runId, mode: "single", cwd: effectiveCwd, index: 0, result }),
 		timeoutMs: data.timeoutMs,
 		deadlineAt,
@@ -3114,6 +3124,9 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		const requestCwd = resolveRequestedCwd(ctx.cwd, requestParams.cwd);
 		const paramsWithResolvedCwd = requestParams.cwd === undefined ? requestParams : { ...requestParams, cwd: requestCwd };
 		const action = paramsWithResolvedCwd.action;
+		if ((action === "resume" || action === "steer") && paramsWithResolvedCwd.acceptance !== undefined) {
+			return { content: [{ type: "text", text: "The acceptance/effects contract is immutable during continuation; start a fresh invocation for a different contract." }], isError: true, details: { mode: "management", results: [] } };
+		}
 		if (action) {
 			if (action === "doctor") {
 				let currentSessionFile: string | null = null;

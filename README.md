@@ -696,7 +696,7 @@ Project-scoped memory resolves under `<project>/.pi/agent-memory/<path>` and tra
 
 ### Tool and extension selection
 
-If `tools` is omitted, `pi-subagents` does not pass `--tools`, so the child gets Pi’s normal builtin tools. If `tools` is present, regular tool names become an explicit allowlist. `mcp:` entries are split out and forwarded as direct MCP selections. Path-like `tools` entries, such as extension paths or `.ts`/`.js` files, are treated as tool-extension paths rather than builtin tool names. Agents that declare only known read-only builtin tools skip the implementation completion guard, but `bash`, unknown tools, and MCP tools stay mutation-capable. Use `completionGuard: false` for bash-enabled validators or advisors that should never be judged as implementation agents.
+If `tools` is omitted, `pi-subagents` does not pass `--tools`, so the child gets Pi’s normal builtin tools. If `tools` is present, regular tool names become an explicit allowlist. `mcp:` entries are split out and forwarded as direct MCP selections. Path-like `tools` entries, such as extension paths or `.ts`/`.js` files, are treated as tool-extension paths rather than builtin tool names. Agents that declare only known read-only builtin tools skip the implementation completion guard, but `bash`, unknown tools, and MCP tools stay mutation-capable. Declare `acceptance: { effects: "advisory" }` for a validation/review task that does not require implementation; this keeps the completion guard separate from a no-write permission policy.
 
 Examples:
 
@@ -1359,7 +1359,23 @@ Every run resolves an effective acceptance policy. Callers may omit `acceptance`
 }
 ```
 
-Accepted levels are `auto`, `none`, `attested`, `checked`, `verified`, and `reviewed`. `acceptance: "auto"` is the default. Read-only reviewer/scout tasks infer lightweight attestation, normal writer tasks infer checked evidence, and async/risky/dynamic writer contexts infer a reviewed gate. To disable gates, prefer `{ level: "none", reason: "..." }`.
+Accepted levels are `auto`, `none`, `attested`, `checked`, `verified`, and `reviewed`. Effects and rigor are separate. Each executing leaf can declare `acceptance.effects: "advisory" | "implementation"`; omitted effects conservatively select implementation evidence, even for a reviewer/scout or task saying “read-only”. This changes earlier role/prose inference. To disable acceptance intentionally, prefer `{ level: "none", reason: "..." }`; the result is `not-required`, not accepted.
+
+```ts
+// Read-only task with structural evidence, not fabricated code/test changes.
+{ agent: "reviewer", task: "Inspect the renderer; return findings only",
+  acceptance: { effects: "advisory", level: "checked" } }
+```
+
+Ordinary advisory tasks start at `attested`; implementation tasks start at `checked`. Async implementation and risky/dynamic contexts retain reviewed rigor. Advisory checked+ requires residual risks and no staged files, adding validation output at verified/reviewed; it does not acquire default changed-files/tests-added/commands-run requirements. Caller-required global or required-criterion evidence is always retained. Caller criteria/evidence raise the floor to checked, runtime verify commands to verified, and explicitly required review to reviewed. Recommended-only criterion evidence stays non-blocking unless independently required. Pure attested defaults are unvalidated requests, not passed structural checks. `verified` without commands fails even when another signal raises the effective level to reviewed; child command claims never count as runtime verification.
+
+The structured effects declaration controls evidence defaults, not tools or permissions. Default implementation evidence never authorizes edits forbidden by the task: correct/relaunch an incompatible request or truthfully fail, rather than manufacture edits/tests. Advisory work may produce a separately requested report artifact; it is not an OS no-write guarantee. Conditional fixes are implementation-capable and retain writer evidence. Advisory suppresses the completion guard's requirement for an edit attempt; implementation capability alone does not require one.
+
+Place effects on the single call's acceptance object, each parallel task, each sequential/static-parallel leaf, or the dynamic child template. Root/group effects are rejected rather than silently inherited. Count expansion preserves the original caller location. Dynamic groups derive effects from their children and have two canonical predicates: nonempty completion without blockers and a parsed report for every materialized child. Custom group criteria are rejected before dispatch; semantic cross-item review belongs in a downstream advisory leaf. Group aggregation never substitutes one child's evidence for another's acceptance.
+
+Resolved policies record versioned effects, caller/default/aggregate provenance and location; the child prompt, ledgers, status/result and graph carry the contract. Foreground snapshots are saved before launch, and async runner configs contain the resolved policy. Continuations cannot override acceptance; terminal revival reuses a supported exact snapshot or refuses legacy/missing/conflicting policy. Follow-up prose does not widen effects. Scheduled jobs retain the effects policy epoch and declaration and are revalidated before firing; unsupported legacy jobs are held with an actionable failure rather than silently reinterpreted. These stores are local runtime evidence, not a sandbox or backup.
+
+Saved JSON chains preserve leaf contracts. Sequential Markdown chains support a JSON `acceptance:` line; unsupported lossy parallel/dynamic representations must use `.chain.json`. Existing slash inline acceptance only supports its documented level shorthand: use the tool API or a saved chain for an effects object. Older runtimes reject the new field; do not retry by stripping it or lowering gates. Caller migration and platform qualification precede rollout.
 
 Acceptance provenance is stored separately from child prose:
 
@@ -1370,7 +1386,7 @@ Acceptance provenance is stored separately from child prose:
 - `reviewed`: an independent reviewer result is present.
 - `rejected`: attestation, structural checks, verification, or review failed.
 
-For `attested` or stricter levels, the child prompt includes a standardized acceptance section and asks for a fenced `acceptance-report` JSON block. Explicit failed gates fail the run. Inferred gates are persisted for observability without breaking older calls that omit `acceptance`.
+For `attested` or stricter levels, the child prompt includes a standardized acceptance section and asks for a fenced `acceptance-report` JSON block. Explicit rejected leaf contracts fail otherwise-successful runs; implicit leaf rejections remain recorded without themselves failing the run. Nonempty dynamic groups fail on rejected group ledgers whether group acceptance is explicit or omitted. Empty groups skip omitted group acceptance; supplied group acceptance evaluates missing child evidence and rejects unless acceptance is intentionally disabled. Timeouts, cancellation and turn limits remain distinct. Required N/A fails at checked+; an attested report alone proves neither criterion satisfaction nor implementation.
 
 ## Live progress
 
