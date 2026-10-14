@@ -32,7 +32,6 @@ jobs:
       GIT_CONFIG_VALUE_1: 'lf'
       PYTHONDONTWRITEBYTECODE: '1'
       CRA879_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
-      CRA879_OUT: ${{ runner.temp }}/cra879-results
     steps:
       - name: Checkout exact candidate head, never merge tree
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -50,15 +49,15 @@ jobs:
       - name: CI-only helper checks (no product imports)
         run: python -B .github/qualification/test_run.py
       - name: One isolated locked-install and suite execution
-        run: python -B .github/qualification/run.py --suite ${{ matrix.suite }} --profile ${{ matrix.profile }} --out "${{ env.CRA879_OUT }}"
+        run: python -B .github/qualification/run.py --suite ${{ matrix.suite }} --profile ${{ matrix.profile }} --out "${{ runner.temp }}/cra879-results"
       - name: Preserve receipts on success or failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cra879-${{ matrix.os }}-${{ matrix.profile }}-${{ matrix.suite }}-${{ github.event.pull_request.head.sha }}
           path: |
-            ${{ env.CRA879_OUT }}/**
-            !${{ env.CRA879_OUT }}/**/*.pending
+            ${{ runner.temp }}/cra879-results/**
+            !${{ runner.temp }}/cra879-results/**/*.pending
           include-hidden-files: true # Only the fresh, allowlisted qualification output directory.
           if-no-files-found: error
           retention-days: 30

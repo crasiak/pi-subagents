@@ -162,6 +162,14 @@ class QualificationTests(unittest.TestCase):
         rows = qualification.retain_evidence(source, self.root / "retained", self.anchor(source))
         self.assertEqual([row["path"] for row in rows], ["custody.json"])
 
+    def test_runner_context_is_only_evaluated_in_steps(self):
+        repo = Path(__file__).resolve().parents[2]
+        workflow = (repo / ".github/workflows/cra879-qualification.yml").read_text()
+        job_prefix, steps = workflow.split("\n    steps:\n", 1)
+        self.assertNotIn("runner.", job_prefix, "runner context is unavailable in jobs.<job_id>.env")
+        self.assertNotIn("env.CRA879_OUT", workflow)
+        self.assertEqual(steps.count("${{ runner.temp }}/cra879-results"), 3)
+
     def test_workflow_overrides_ambient_crlf_before_checkout(self):
         repo = Path(__file__).resolve().parents[2]
         workflow = (repo / ".github/workflows/cra879-qualification.yml").read_text()
