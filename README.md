@@ -1,3 +1,5 @@
+> **Personal fork — not intended for public consumption.** This is a personal working copy of [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents), kept for experiments. It is unmaintained and unsupported, may diverge from upstream or be rewritten at any time, and nothing here is released for others to use. Use the upstream project instead.
+
 <p>
   <img src="https://raw.githubusercontent.com/nicobailon/pi-subagents/main/banner.png" alt="pi-subagents" width="1100">
 </p>
